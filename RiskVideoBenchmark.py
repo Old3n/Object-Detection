@@ -70,18 +70,63 @@ def resolve_source(value: str) -> tuple[bool, int | str, str, Path | None]:
 def open_capture(
     source: int | str,
     backend_name: str,
-) -> cv2.VideoCapture:
-    """Open an OpenCV source using the selected capture backend."""
+) -> tuple[cv2.VideoCapture, str]:
+    """Open a source using ordered backend fallbacks.
+
+    Windows USB cameras are attempted with MSMF first, then DirectShow, then
+    OpenCV's automatic backend. Network streams prefer FFmpeg.
+    """
     backend_map = {
         "auto": cv2.CAP_ANY,
         "dshow": cv2.CAP_DSHOW,
         "msmf": cv2.CAP_MSMF,
         "ffmpeg": cv2.CAP_FFMPEG,
     }
-    backend = backend_map[backend_name]
-    if isinstance(source, int) and backend_name == "auto":
-        return cv2.VideoCapture(source)
-    return cv2.VideoCapture(source, backend)
+
+    if isinstance(source, int):
+        preferred = ["msmf", "dshow", "auto"] if backend_name == "auto" else [backend_name]
+        fallback = [name for name in ("msmf", "dshow", "auto") if name not in preferred]
+    elif isinstance(source, str) and source.lower().startswith(
+        ("rtsp://", "rtsps://", "http://", "https://")
+    ):
+        preferred = ["ffmpeg", "auto"] if backend_name == "auto" else [backend_name]
+        fallback = [name for name in ("ffmpeg", "auto") if name not in preferred]
+    else:
+        preferred = ["auto"] if backend_name == "auto" else [backend_name]
+        fallback = ["auto"] if "auto" not in preferred else []
+
+    attempts = preferred + fallback
+    errors: list[str] = []
+    for name in attempts:
+        capture = None
+        try:
+            api = backend_map[name]
+            capture = (
+                cv2.VideoCapture(source)
+                if name == "auto"
+                else cv2.VideoCapture(source, api)
+            )
+            if capture is not None and capture.isOpened():
+                if name != preferred[0]:
+                    print(
+                        f"[WARN] Camera backend '{preferred[0]}' failed; "
+                        f"opened source using '{name}'."
+                    )
+                return capture, name
+            errors.append(f"{name}: device did not open")
+        except (cv2.error, RuntimeError, TypeError) as exc:
+            errors.append(f"{name}: {exc}")
+        finally:
+            if capture is not None and not capture.isOpened():
+                capture.release()
+
+    attempted = ", ".join(attempts)
+    details = " | ".join(errors)
+    raise RuntimeError(
+        f"Could not open capture source {source!r}. Tried backends: {attempted}. "
+        f"Details: {details}. Close apps using the camera, check Windows camera "
+        "privacy permissions, then run tools/list_cameras.py to find the correct index."
+    )
 
 
 def _blend_panel(frame: Any, x1: int, y1: int, x2: int, y2: int, alpha: float = 0.82) -> None:
@@ -477,13 +522,7 @@ def main() -> int:
     for path in (output, csv_path, json_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    capture = open_capture(capture_source, args.camera_backend)
-    if not capture.isOpened():
-        raise RuntimeError(
-            f"OpenCV could not open source '{source_display}'. "
-            "For USB cameras try --camera-backend dshow or msmf; "
-            "for IP cameras check the RTSP/HTTP URL and stream credentials."
-        )
+    capture, camera_backend_used = open_capture(capture_source, args.camera_backend)
     if args.capture_width > 0:
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.capture_width)
     if args.capture_height > 0:
@@ -610,7 +649,7 @@ def main() -> int:
 
     source_mode = "LIVE" if is_live else "FILE"
     print(f"[INFO] Source: {source_display} ({source_mode})")
-    print(f"[INFO] Capture: {width}x{height} @ {fps:.3f} FPS")
+    print(f"[INFO] Capture: {width}x{height} @ {fps:.3f} FPS ({camera_backend_used})")
     print(f"[INFO] Model: {weights_ref}")
     print(f"[INFO] Device: {device}, precision: {'FP16' if use_fp16 else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
@@ -871,7 +910,8 @@ def main() -> int:
         "precision": "fp16" if use_fp16 else "fp32",
         "video": {
             "width": width, "height": height, "fps": fps,
-            "capture_backend": args.camera_backend,
+            "capture_backend_requested": args.camera_backend,
+            "capture_backend_used": camera_backend_used,
             "metadata_frames": total_frames,
             "metadata_duration_seconds": duration_seconds,
         },
