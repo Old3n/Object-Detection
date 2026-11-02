@@ -179,6 +179,7 @@ class CollisionRiskAssessor:
         *,
         timestamp: float | None = None,
         pedestrian_class_ids: Iterable[int] | None = None,
+        ego_corridor: Sequence[Sequence[float]] | None = None,
     ) -> FrameRisk:
         """Accept rows of x1,y1,x2,y2,track_id,confidence,class_id."""
         height, width = int(frame_shape[0]), int(frame_shape[1])
@@ -190,6 +191,13 @@ class CollisionRiskAssessor:
             if pedestrian_class_ids is None
             else set(pedestrian_class_ids)
         )
+        corridor = self.ego_corridor if ego_corridor is None else tuple(
+            (float(x), float(y)) for x, y in ego_corridor
+        )
+        if len(corridor) < 3 or any(
+            not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0) for x, y in corridor
+        ):
+            raise ValueError("ego_corridor must be a polygon with normalized 0..1 coordinates")
         results: list[ObjectRisk] = []
 
         for raw in tracked_objects:
@@ -218,7 +226,7 @@ class CollisionRiskAssessor:
             samples = tuple(history)
 
             in_corridor = self.point_in_polygon(
-                (center_x_norm, bottom_y_norm), self.ego_corridor
+                (center_x_norm, bottom_y_norm), corridor
             )
             ttc = self._ttc(samples)
             lateral_velocity = (
@@ -237,7 +245,7 @@ class CollisionRiskAssessor:
                     eta = self.cut_in_horizon_seconds * step / 10
                     projected_x = center_x_norm + lateral_velocity * eta
                     if self.point_in_polygon(
-                        (projected_x, bottom_y_norm), self.ego_corridor
+                        (projected_x, bottom_y_norm), corridor
                     ):
                         cut_in_eta = eta
                         break
@@ -293,7 +301,7 @@ class CollisionRiskAssessor:
             self.history.pop(track_id, None)
 
         if not results:
-            return FrameRisk(CLEAR, "No eligible tracked obstacles", (), self.ego_corridor)
+            return FrameRisk(CLEAR, "No eligible tracked obstacles", (), corridor)
         rank = {CLEAR: 0, CAUTION: 1, HIGH: 2, CRITICAL: 3}
         highest = max(results, key=lambda item: rank[item.level])
         reason = (
@@ -301,4 +309,4 @@ class CollisionRiskAssessor:
             if highest.level != CLEAR
             else "No elevated collision risk estimated"
         )
-        return FrameRisk(highest.level, reason, tuple(results), self.ego_corridor)
+        return FrameRisk(highest.level, reason, tuple(results), corridor)
