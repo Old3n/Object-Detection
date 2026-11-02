@@ -91,10 +91,6 @@ def parse_args() -> argparse.Namespace:
         "--quantize", choices=("fp32", "fp16"), default="fp32",
         help="Inference precision: fp32 (default) or fp16 (CUDA only).",
     )
-    parser.add_argument(
-        "--half", dest="quantize", action="store_const", const="fp16",
-        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
-    )
     return parser.parse_args()
 
 
