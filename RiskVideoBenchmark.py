@@ -151,6 +151,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", dest="json_path", type=Path, default=None)
     parser.add_argument("--no-save-video", action="store_true")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument(
+        "--display-width", type=int, default=1280,
+        help="Maximum preview-window width in pixels (default: 1280).",
+    )
+    parser.add_argument(
+        "--display-height", type=int, default=720,
+        help="Maximum preview-window height in pixels (default: 720).",
+    )
     parser.add_argument("--half", action="store_true")
     return parser.parse_args()
 
@@ -164,6 +172,8 @@ def main() -> int:
         raise FileNotFoundError(f"Input video not found: {source}")
     if args.imgsz < 32 or args.max_frames is not None and args.max_frames < 1:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
+    if args.display_width < 1 or args.display_height < 1:
+        raise ValueError("--display-width and --display-height must be positive.")
     if not 0.0 < args.conf <= 1.0 or not 0.0 < args.iou <= 1.0:
         raise ValueError("--conf and --iou must be in (0,1].")
 
@@ -238,6 +248,10 @@ def main() -> int:
     print(f"[INFO] Device: {device}, precision: {'FP16' if half else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
 
+    window_title = "YOLO tracking + collision-risk assessment (Q/Esc to stop)"
+    if args.show:
+        cv2.namedWindow(window_title, cv2.WINDOW_AUTOSIZE)
+
     try:
         while args.max_frames is None or frame_count < args.max_frames:
             frame_start = time.perf_counter()
@@ -294,7 +308,21 @@ def main() -> int:
             if writer is not None:
                 writer.write(annotated)
             if args.show:
-                cv2.imshow("YOLO tracking + collision-risk assessment (Q/Esc to stop)", annotated)
+                frame_height, frame_width = annotated.shape[:2]
+                scale = min(
+                    1.0,
+                    args.display_width / frame_width,
+                    args.display_height / frame_height,
+                )
+                if scale < 1.0:
+                    preview = cv2.resize(
+                        annotated,
+                        (max(1, round(frame_width * scale)), max(1, round(frame_height * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                else:
+                    preview = annotated
+                cv2.imshow(window_title, preview)
                 if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
                     break
 
