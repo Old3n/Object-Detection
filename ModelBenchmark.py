@@ -217,7 +217,7 @@ class LiveMonitorBenchmark:
             if cfg["mode"] == "ocsort" and HAS_BOXMOT:
                 res = cfg["yolo"].predict(
                     frame, classes=active_classes, imgsz=640,
-                    device=self.device, half=True, conf=0.25, verbose=False
+                    device=self.device, quantize=16, conf=0.25, verbose=False
                 )
                 dets = res[0].boxes.data.cpu().numpy()
                 if len(dets) > 0:
@@ -227,7 +227,7 @@ class LiveMonitorBenchmark:
             else:
                 res = cfg["yolo"].track(
                     frame, tracker=cfg["tracker"], classes=active_classes,
-                    imgsz=640, device=self.device, half=True, persist=True, verbose=False
+                    imgsz=640, device=self.device, quantize=16, persist=True, verbose=False
                 )
                 boxes = res[0].boxes
                 if boxes.id is not None:
