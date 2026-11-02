@@ -176,7 +176,8 @@ class LaneDetector:
         left_segments: list[tuple[int, int, int, int]] = []
         right_segments: list[tuple[int, int, int, int]] = []
         if lines is not None:
-            for raw in lines[:, 0, :]:
+            # OpenCV builds differ: HoughLinesP may return (N, 1, 4) or (N, 4).
+            for raw in np.asarray(lines).reshape(-1, 4):
                 x1, y1, x2, y2 = (int(value) for value in raw)
                 dx = x2 - x1
                 dy = y2 - y1
