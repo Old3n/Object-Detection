@@ -72,7 +72,8 @@ def draw_report(
     """Render detections plus a readable risk, tracker, and performance dashboard."""
     stats = stats or {}
     height, width = frame.shape[:2]
-    scale = max(0.75, min(2.0, min(width / 1280.0, height / 720.0)))
+    ui_scale = float(stats.get("ui_scale", 1.15))
+    scale = max(0.75, min(2.0, min(width / 1280.0, height / 720.0) * ui_scale))
     font = cv2.FONT_HERSHEY_SIMPLEX
     line = max(24, round(32 * scale))
     margin = max(10, round(16 * scale))
@@ -139,6 +140,7 @@ def draw_report(
     device = str(stats.get("device", "auto"))
     precision = str(stats.get("precision", "FP32"))
     conf = float(stats.get("confidence", 0.25))
+    raw_detection_count = int(stats.get("raw_detections", len(tracked_objects)))
 
     title_y = round(32 * scale)
     detail_y = round(65 * scale)
@@ -160,7 +162,7 @@ def draw_report(
     )
     perf = (
         f"{model_name} | {tracker_name} | {device} {precision} | "
-        f"DET {len(tracked_objects)} | INF {inference_ms:.1f}ms | "
+        f"DET {raw_detection_count} | TRACKED {len(tracked_objects)} | INF {inference_ms:.1f}ms | "
         f"LOOP {loop_ms:.1f}ms | {fps_now:.1f} FPS | CONF {conf:.2f}"
     )
     cv2.putText(
@@ -172,7 +174,10 @@ def draw_report(
     panel_text_x = panel_x + margin
     panel_inner_w = panel_w - 2 * margin
     current_counts: Counter[str] = Counter(
-        class_name(names, item[6]) for item in tracked_objects
+        stats.get("class_counts") or {
+            class_name(names, item[6]): sum(1 for obj in tracked_objects if obj[6] == item[6])
+            for item in tracked_objects
+        }
     )
     object_risks = sorted(
         report.objects,
@@ -183,28 +188,39 @@ def draw_report(
         ),
     )
     cv2.putText(
-        frame, f"TRACKED OBJECTS  ({len(tracked_objects)})",
+        frame, f"TRACKS {len(tracked_objects)}  |  DETECTIONS {raw_detection_count}",
         (panel_text_x, panel_y + line), font, 0.62 * scale,
         (255, 255, 255), thickness, cv2.LINE_AA,
     )
 
     y = panel_y + line * 2
     row_limit = max(1, min(max_display_objects, max(1, (footer_y - y - line) // (line * 2))))
-    if not tracked_objects:
+    if not tracked_objects and raw_detection_count > 0:
         cv2.putText(
-            frame, "NO TRACKED OBJECTS",
+            frame, f"{raw_detection_count} DETECTIONS - WAITING FOR TRACK IDS",
             (panel_text_x, y), font, 0.60 * scale,
             (180, 210, 255), thickness, cv2.LINE_AA,
         )
         cv2.putText(
-            frame, "No IDs available in this frame.",
+            frame, "Detector found boxes; tracker has not assigned IDs.",
             (panel_text_x, y + line), font, 0.48 * scale,
             (225, 225, 225), max(1, thickness - 1), cv2.LINE_AA,
         )
         cv2.putText(
-            frame, "TTC requires a stable track history.",
+            frame, "Risk estimation starts after track association.",
             (panel_text_x, y + line * 2), font, 0.43 * scale,
             (190, 200, 210), max(1, thickness - 1), cv2.LINE_AA,
+        )
+    elif not tracked_objects:
+        cv2.putText(
+            frame, "NO OBJECTS DETECTED",
+            (panel_text_x, y), font, 0.60 * scale,
+            (180, 210, 255), thickness, cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, "Check camera framing and class filters.",
+            (panel_text_x, y + line), font, 0.46 * scale,
+            (225, 225, 225), max(1, thickness - 1), cv2.LINE_AA,
         )
     else:
         for item in object_risks[:row_limit]:
@@ -311,6 +327,10 @@ def parse_args() -> argparse.Namespace:
         default=argparse.SUPPRESS, help=argparse.SUPPRESS,
     )
     parser.add_argument("--max-display-objects", type=int, default=8)
+    parser.add_argument(
+        "--ui-scale", type=float, default=1.15,
+        help="Dashboard text/panel scale multiplier (default: 1.15).",
+    )
     return parser.parse_args()
 
 
@@ -327,6 +347,8 @@ def main() -> int:
         raise ValueError("--display-width and --display-height must be positive.")
     if args.max_display_objects < 1:
         raise ValueError("--max-display-objects must be positive.")
+    if not 0.6 <= args.ui_scale <= 2.0:
+        raise ValueError("--ui-scale must be between 0.6 and 2.0.")
     if not 0.0 < args.conf <= 1.0 or not 0.0 < args.iou <= 1.0:
         raise ValueError("--conf and --iou must be in (0,1].")
 
@@ -398,6 +420,7 @@ def main() -> int:
     risk_frames: Counter[str] = Counter()
     frame_count = 0
     detection_total = 0
+    raw_detection_total = 0
     max_risk = CLEAR
     start = time.perf_counter()
 
@@ -435,21 +458,29 @@ def main() -> int:
             inference_ms = (time.perf_counter() - inference_start) * 1000.0
 
             tracked_objects = []
+            raw_class_counts: Counter[str] = Counter()
+            raw_detection_count = 0
             boxes = result.boxes
-            if boxes is not None and len(boxes) > 0 and boxes.id is not None:
-                coordinates = boxes.xyxy.cpu().tolist()
-                track_ids = boxes.id.int().cpu().tolist()
-                confidences = boxes.conf.float().cpu().tolist()
-                class_ids = boxes.cls.int().cpu().tolist()
-                tracked_objects = [
-                    (
-                        box[0], box[1], box[2], box[3],
-                        int(track_id), float(confidence), int(class_id),
-                    )
-                    for box, track_id, confidence, class_id in zip(
-                        coordinates, track_ids, confidences, class_ids
-                    )
-                ]
+            if boxes is not None and len(boxes) > 0:
+                raw_class_ids = boxes.cls.int().cpu().tolist()
+                raw_detection_count = len(raw_class_ids)
+                raw_class_counts.update(
+                    class_name(names, int(class_id)) for class_id in raw_class_ids
+                )
+                if boxes.id is not None:
+                    coordinates = boxes.xyxy.cpu().tolist()
+                    track_ids = boxes.id.int().cpu().tolist()
+                    confidences = boxes.conf.float().cpu().tolist()
+                    tracked_class_ids = boxes.cls.int().cpu().tolist()
+                    tracked_objects = [
+                        (
+                            box[0], box[1], box[2], box[3],
+                            int(track_id), float(confidence), int(class_id),
+                        )
+                        for box, track_id, confidence, class_id in zip(
+                            coordinates, track_ids, confidences, tracked_class_ids
+                        )
+                    ]
 
             video_timestamp = frame_count / fps if fps > 0 else time.monotonic()
             report = assessor.update(
@@ -472,6 +503,9 @@ def main() -> int:
                 "device": device,
                 "precision": "FP16" if use_fp16 else "FP32",
                 "confidence": args.conf,
+                "raw_detections": raw_detection_count,
+                "class_counts": dict(raw_class_counts),
+                "ui_scale": args.ui_scale,
             }
             annotated = draw_report(
                 frame, report, tracked_objects, names,
@@ -479,6 +513,7 @@ def main() -> int:
                 max_display_objects=args.max_display_objects,
             )
             detection_total += len(tracked_objects)
+            raw_detection_total += raw_detection_count
             inference_times.append(inference_ms)
             risk_frames.update([report.level])
             if RISK_RANK[report.level] > RISK_RANK[max_risk]:
@@ -526,7 +561,9 @@ def main() -> int:
                     "timestamp_seconds": frame_count / fps if fps > 0 else None,
                     "inference_ms": round(inference_ms, 4),
                     "processing_ms": round(processing_ms, 4),
+                    "raw_detections": raw_detection_count,
                     "tracked_objects": len(tracked_objects),
+                    "class_counts": json.dumps(dict(raw_class_counts), ensure_ascii=False),
                     "risk_level": report.level,
                     "risk_reason": report.reason,
                     "objects": json.dumps(object_rows, ensure_ascii=False),
@@ -590,7 +627,8 @@ def main() -> int:
     with csv_path.open("w", newline="", encoding="utf-8") as file:
         fields = [
             "frame", "timestamp_seconds", "inference_ms", "processing_ms",
-            "tracked_objects", "risk_level", "risk_reason", "objects",
+            "raw_detections", "tracked_objects", "class_counts",
+            "risk_level", "risk_reason", "objects",
         ]
         writer_csv = csv.DictWriter(file, fieldnames=fields)
         writer_csv.writeheader()
@@ -599,7 +637,8 @@ def main() -> int:
 
     print("\n\n========== VIDEO RISK EVALUATION ==========")
     print(f"Frames:                {frame_count}")
-    print(f"Tracked detections:    {detection_total}")
+    print(f"Raw detections:        {raw_detection_total}")
+    print(f"Tracked objects:       {detection_total}")
     print(f"Average inference:     {summary['average_inference_ms']:.2f} ms")
     print(f"Median / P95 inference:{summary['median_inference_ms']:.2f} / {summary['p95_inference_ms']:.2f} ms")
     print(f"End-to-end FPS:        {summary['end_to_end_fps']:.2f}")
