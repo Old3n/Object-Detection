@@ -116,7 +116,11 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark YOLO tracking and collision-risk assessment on a video."
     )
     parser.add_argument("--source", required=True, type=Path, help="Input video.")
-    parser.add_argument("--weights", required=True, help="YOLO checkpoint (.pt).")
+    parser.add_argument(
+        "--weights",
+        required=True,
+        help="Local checkpoint path or Ultralytics model name such as yolo26n.pt.",
+    )
     parser.add_argument(
         "--tracker",
         default="bytetrack.yaml",
@@ -154,11 +158,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     source = args.source.expanduser().resolve()
-    weights = Path(args.weights).expanduser().resolve()
+    weights_path = Path(args.weights).expanduser()
+    weights_ref = str(weights_path.resolve()) if weights_path.is_file() else args.weights
     if not source.is_file():
         raise FileNotFoundError(f"Input video not found: {source}")
-    if not weights.is_file():
-        raise FileNotFoundError(f"Model weights not found: {weights}")
     if args.imgsz < 32 or args.max_frames is not None and args.max_frames < 1:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
     if not 0.0 < args.conf <= 1.0 or not 0.0 < args.iou <= 1.0:
@@ -214,7 +217,8 @@ def main() -> int:
             capture.release()
             raise RuntimeError(f"Could not create output video: {output}")
 
-    model = YOLO(str(weights))
+    print(f"[INFO] Loading model: {weights_ref}")
+    model = YOLO(weights_ref)
     assessor = CollisionRiskAssessor(
         pedestrian_class_ids=args.pedestrian_class_ids,
         vehicle_class_ids=args.vehicle_class_ids,
@@ -230,7 +234,7 @@ def main() -> int:
     start = time.perf_counter()
 
     print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
-    print(f"[INFO] Model: {weights}")
+    print(f"[INFO] Model: {weights_ref}")
     print(f"[INFO] Device: {device}, precision: {'FP16' if half else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
 
@@ -343,7 +347,7 @@ def main() -> int:
     elapsed = time.perf_counter() - start
     summary = {
         "source": str(source),
-        "weights": str(weights),
+        "weights": weights_ref,
         "tracker": args.tracker,
         "device": device,
         "precision": "fp16" if half else "fp32",
