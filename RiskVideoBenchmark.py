@@ -275,7 +275,10 @@ def main() -> int:
                     )
                 ]
 
-            report = assessor.update(tracked_objects, frame.shape)
+            video_timestamp = frame_count / fps if fps > 0 else time.monotonic()
+            report = assessor.update(
+                tracked_objects, frame.shape, timestamp=video_timestamp
+            )
             annotated = draw_report(frame, report, tracked_objects, names)
             frame_count += 1
             detection_total += len(tracked_objects)
