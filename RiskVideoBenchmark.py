@@ -53,13 +53,31 @@ def sync_cuda(device: str) -> None:
         torch.cuda.synchronize(int(index)) if index.isdigit() else torch.cuda.synchronize()
 
 
+def _blend_panel(frame: Any, x1: int, y1: int, x2: int, y2: int, alpha: float = 0.82) -> None:
+    """Draw a dark translucent panel without hiding all underlying footage."""
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), (12, 16, 22), -1)
+    cv2.addWeighted(overlay, alpha, frame, 1.0 - alpha, 0, frame)
+
+
 def draw_report(
     frame: Any,
     report: Any,
     tracked_objects: list[tuple[float, float, float, float, int, float, int]],
     names: Any,
+    *,
+    stats: dict[str, Any] | None = None,
+    max_display_objects: int = 8,
 ) -> Any:
+    """Render detections plus a readable risk, tracker, and performance dashboard."""
+    stats = stats or {}
     height, width = frame.shape[:2]
+    scale = max(0.75, min(2.0, min(width / 1280.0, height / 720.0)))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    line = max(24, round(32 * scale))
+    margin = max(10, round(16 * scale))
+    thickness = max(1, round(2 * scale))
+
     polygon = [
         (round(x * width), round(y * height))
         for x, y in report.corridor
@@ -71,42 +89,167 @@ def draw_report(
     cv2.fillPoly(overlay, [polygon_array], (255, 255, 0))
     cv2.addWeighted(overlay, 0.055, frame, 0.945, 0, frame)
     cv2.polylines(
-        frame, [polygon_array], isClosed=True, color=(0, 255, 255), thickness=2
+        frame, [polygon_array], isClosed=True, color=(0, 255, 255),
+        thickness=max(2, round(2 * scale)),
     )
 
     risk_by_id = {item.track_id: item for item in report.objects}
     for x1, y1, x2, y2, track_id, confidence, class_id in tracked_objects:
         risk = risk_by_id.get(track_id)
-        color = RISK_COLORS[risk.level] if risk else (180, 180, 180)
+        color = RISK_COLORS[risk.level] if risk else (190, 190, 190)
         box = (int(x1), int(y1), int(x2), int(y2))
-        cv2.rectangle(frame, box[:2], box[2:], color, 2)
-        label = (
-            f"ID {track_id} {class_name(names, class_id)} {confidence:.2f}"
+        cv2.rectangle(
+            frame, box[:2], box[2:], color, max(2, round(2 * scale))
         )
+        label = f"ID {track_id} | {class_name(names, class_id)} | {confidence:.2f}"
         if risk and risk.ttc_seconds is not None:
-            label += f" TTC~{risk.ttc_seconds:.1f}s"
+            label += f" | TTC~{risk.ttc_seconds:.1f}s"
         elif risk and risk.cut_in_eta_seconds is not None:
-            label += f" ENTRY~{risk.cut_in_eta_seconds:.1f}s"
+            label += f" | ENTRY~{risk.cut_in_eta_seconds:.1f}s"
+        text_y = max(round(22 * scale), box[1] - round(8 * scale))
         cv2.putText(
-            frame,
-            label,
-            (box[0], max(18, box[1] - 7)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
-            color,
-            2,
+            frame, label, (box[0], text_y), font, 0.62 * scale,
+            (255, 255, 255), thickness, cv2.LINE_AA,
         )
 
-    banner_color = RISK_COLORS[report.level]
-    cv2.rectangle(frame, (0, 0), (width, 42), (20, 20, 20), -1)
+    header_h = round(112 * scale)
+    footer_h = round(76 * scale)
+    panel_w = min(round(410 * scale), round(width * 0.43))
+    panel_x = width - panel_w
+    footer_y = height - footer_h
+
+    _blend_panel(frame, 0, 0, width, min(height - 1, header_h))
+    _blend_panel(
+        frame, panel_x, header_h + round(8 * scale),
+        width - 1, max(header_h + round(9 * scale), footer_y - round(8 * scale)),
+        0.88,
+    )
+    _blend_panel(frame, 0, footer_y, width, height - 1, 0.88)
+
+    risk_color = RISK_COLORS[report.level]
+    frame_index = int(stats.get("frame", 0))
+    total_frames = int(stats.get("total_frames", 0))
+    timestamp = float(stats.get("video_seconds", 0.0))
+    duration = float(stats.get("duration_seconds", 0.0))
+    inference_ms = float(stats.get("inference_ms", 0.0))
+    loop_ms = float(stats.get("loop_ms", 0.0))
+    fps_now = float(stats.get("fps", 0.0))
+    model_name = str(stats.get("model", "YOLO"))
+    tracker_name = str(stats.get("tracker", "ByteTrack"))
+    device = str(stats.get("device", "auto"))
+    precision = str(stats.get("precision", "FP32"))
+    conf = float(stats.get("confidence", 0.25))
+
+    title_y = round(32 * scale)
+    detail_y = round(65 * scale)
+    reason_y = round(94 * scale)
+    title = f"ADAS PERCEPTION  |  RISK: {report.level}"
     cv2.putText(
-        frame,
-        f"COLLISION RISK: {report.level} | {report.reason[:105]}",
-        (10, 28),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.58,
-        banner_color,
-        2,
+        frame, title, (margin, title_y), font, 0.82 * scale,
+        risk_color, thickness + 1, cv2.LINE_AA,
+    )
+    position = (
+        f"FRAME {frame_index:,}/{total_frames:,}  |  "
+        f"VIDEO {timestamp:05.1f}s/{duration:05.1f}s"
+        if total_frames > 0
+        else f"FRAME {frame_index:,}  |  VIDEO {timestamp:05.1f}s"
+    )
+    cv2.putText(
+        frame, position, (margin, detail_y), font, 0.57 * scale,
+        (240, 240, 240), thickness, cv2.LINE_AA,
+    )
+    perf = (
+        f"{model_name} | {tracker_name} | {device} {precision} | "
+        f"DET {len(tracked_objects)} | INF {inference_ms:.1f}ms | "
+        f"LOOP {loop_ms:.1f}ms | {fps_now:.1f} FPS | CONF {conf:.2f}"
+    )
+    cv2.putText(
+        frame, perf[:180], (margin, reason_y), font, 0.48 * scale,
+        (210, 220, 230), max(1, thickness - 1), cv2.LINE_AA,
+    )
+
+    panel_y = header_h + round(8 * scale)
+    panel_text_x = panel_x + margin
+    panel_inner_w = panel_w - 2 * margin
+    current_counts: Counter[str] = Counter(
+        class_name(names, item[6]) for item in tracked_objects
+    )
+    object_risks = sorted(
+        report.objects,
+        key=lambda item: (
+            -RISK_RANK[item.level],
+            -(item.ttc_seconds is not None and 1.0 / max(item.ttc_seconds, 1e-3) or 0.0),
+            -item.confidence,
+        ),
+    )
+    cv2.putText(
+        frame, f"TRACKED OBJECTS  ({len(tracked_objects)})",
+        (panel_text_x, panel_y + line), font, 0.62 * scale,
+        (255, 255, 255), thickness, cv2.LINE_AA,
+    )
+
+    y = panel_y + line * 2
+    row_limit = max(1, min(max_display_objects, max(1, (footer_y - y - line) // (line * 2))))
+    if not tracked_objects:
+        cv2.putText(
+            frame, "NO TRACKED OBJECTS",
+            (panel_text_x, y), font, 0.60 * scale,
+            (180, 210, 255), thickness, cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, "No IDs available in this frame.",
+            (panel_text_x, y + line), font, 0.48 * scale,
+            (225, 225, 225), max(1, thickness - 1), cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame, "TTC requires a stable track history.",
+            (panel_text_x, y + line * 2), font, 0.43 * scale,
+            (190, 200, 210), max(1, thickness - 1), cv2.LINE_AA,
+        )
+    else:
+        for item in object_risks[:row_limit]:
+            item_color = RISK_COLORS[item.level]
+            name = class_name(names, item.class_id).upper()
+            summary = f"#{item.track_id} {name}  conf {item.confidence:.2f}"
+            if len(summary) > 35:
+                summary = summary[:32] + "..."
+            cv2.putText(
+                frame, summary, (panel_text_x, y), font, 0.49 * scale,
+                (245, 245, 245), max(1, thickness - 1), cv2.LINE_AA,
+            )
+            if item.ttc_seconds is not None:
+                extra = f"{item.level}  |  TTC ~{item.ttc_seconds:.1f}s"
+            elif item.cut_in_eta_seconds is not None:
+                extra = f"{item.level}  |  ENTER ~{item.cut_in_eta_seconds:.1f}s"
+            else:
+                extra = f"{item.level}  |  ROI {'IN' if item.in_ego_corridor else 'OUT'}"
+            cv2.putText(
+                frame, extra, (panel_text_x, y + round(line * 0.78)),
+                font, 0.46 * scale, item_color, max(1, thickness - 1), cv2.LINE_AA,
+            )
+            y += line * 2
+
+        remaining = len(object_risks) - row_limit
+        if remaining > 0 and y < footer_y - line:
+            cv2.putText(
+                frame, f"+ {remaining} more tracked objects (see CSV)",
+                (panel_text_x, y), font, 0.43 * scale,
+                (185, 195, 205), max(1, thickness - 1), cv2.LINE_AA,
+            )
+
+    counts_text = "  |  ".join(
+        f"{name}: {count}" for name, count in sorted(current_counts.items())
+    ) or "Class counts: none"
+    count_y = footer_y + round(27 * scale)
+    legend_y = footer_y + round(58 * scale)
+    cv2.putText(
+        frame, counts_text[:150], (margin, count_y), font, 0.50 * scale,
+        (245, 245, 245), max(1, thickness - 1), cv2.LINE_AA,
+    )
+    legend = "RISK GUIDE: CLEAR  |  CAUTION 3-5s  |  HIGH 1.5-3s  |  CRITICAL <=1.5s"
+    cv2.putText(
+        frame, legend, (margin, legend_y), font, 0.43 * scale,
+        (190, 205, 220), max(1, thickness - 1), cv2.LINE_AA,
     )
     return frame
 
@@ -159,7 +302,15 @@ def parse_args() -> argparse.Namespace:
         "--display-height", type=int, default=720,
         help="Maximum preview-window height in pixels (default: 720).",
     )
-    parser.add_argument("--half", action="store_true")
+    parser.add_argument(
+        "--quantize", choices=("fp32", "fp16"), default="fp32",
+        help="Inference precision: fp32 (default) or fp16 (CUDA only).",
+    )
+    parser.add_argument(
+        "--half", dest="quantize", action="store_const", const="fp16",
+        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--max-display-objects", type=int, default=8)
     return parser.parse_args()
 
 
@@ -174,6 +325,8 @@ def main() -> int:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
     if args.display_width < 1 or args.display_height < 1:
         raise ValueError("--display-width and --display-height must be positive.")
+    if args.max_display_objects < 1:
+        raise ValueError("--max-display-objects must be positive.")
     if not 0.0 < args.conf <= 1.0 or not 0.0 < args.iou <= 1.0:
         raise ValueError("--conf and --iou must be in (0,1].")
 
@@ -183,7 +336,10 @@ def main() -> int:
     wants_cuda = device.startswith("cuda") or device.split(",", 1)[0].isdigit()
     if wants_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but PyTorch cannot access a CUDA GPU.")
-    half = bool(args.half and wants_cuda)
+    use_fp16 = args.quantize == "fp16" and wants_cuda
+    quantize = 16 if use_fp16 else 32
+    if args.quantize == "fp16" and not wants_cuda:
+        print("[WARN] FP16 requested without CUDA; using FP32.")
 
     output = (
         args.output.expanduser().resolve()
@@ -245,7 +401,7 @@ def main() -> int:
 
     print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
     print(f"[INFO] Model: {weights_ref}")
-    print(f"[INFO] Device: {device}, precision: {'FP16' if half else 'FP32'}")
+    print(f"[INFO] Device: {device}, precision: {'FP16' if use_fp16 else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
 
     window_title = "YOLO tracking + collision-risk assessment (Q/Esc to stop)"
@@ -269,7 +425,7 @@ def main() -> int:
                 conf=args.conf,
                 iou=args.iou,
                 device=device,
-                half=half,
+                quantize=quantize,
                 classes=args.classes,
                 verbose=False,
             )[0]
@@ -378,7 +534,7 @@ def main() -> int:
         "weights": weights_ref,
         "tracker": args.tracker,
         "device": device,
-        "precision": "fp16" if half else "fp32",
+        "precision": "fp16" if use_fp16 else "fp32",
         "video": {"width": width, "height": height, "fps": fps},
         "frames": frame_count,
         "tracked_detections": detection_total,
