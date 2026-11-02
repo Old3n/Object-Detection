@@ -322,10 +322,6 @@ def parse_args() -> argparse.Namespace:
         "--quantize", choices=("fp32", "fp16"), default="fp32",
         help="Inference precision: fp32 (default) or fp16 (CUDA only).",
     )
-    parser.add_argument(
-        "--half", dest="quantize", action="store_const", const="fp16",
-        default=argparse.SUPPRESS, help=argparse.SUPPRESS,
-    )
     parser.add_argument("--max-display-objects", type=int, default=8)
     parser.add_argument(
         "--ui-scale", type=float, default=1.15,
@@ -407,6 +403,7 @@ def main() -> int:
             capture.release()
             raise RuntimeError(f"Could not create output video: {output}")
 
+    print("[INFO] Risk dashboard: v2 (HUD rendered after preview resize)")
     print(f"[INFO] Loading model: {weights_ref}")
     model = YOLO(weights_ref)
     assessor = CollisionRiskAssessor(
@@ -508,7 +505,7 @@ def main() -> int:
                 "ui_scale": args.ui_scale,
             }
             annotated = draw_report(
-                frame, report, tracked_objects, names,
+                frame.copy(), report, tracked_objects, names,
                 stats=display_stats,
                 max_display_objects=args.max_display_objects,
             )
@@ -522,20 +519,39 @@ def main() -> int:
             if writer is not None:
                 writer.write(annotated)
             if args.show:
-                frame_height, frame_width = annotated.shape[:2]
+                # Resize the clean frame first, then draw the dashboard at preview
+                # resolution. Otherwise the dashboard text gets shrunk along with
+                # a high-resolution source video and becomes unreadable.
+                frame_height, frame_width = frame.shape[:2]
                 scale = min(
                     1.0,
                     args.display_width / frame_width,
                     args.display_height / frame_height,
                 )
-                if scale < 1.0:
-                    preview = cv2.resize(
-                        annotated,
-                        (max(1, round(frame_width * scale)), max(1, round(frame_height * scale))),
-                        interpolation=cv2.INTER_AREA,
+                preview_width = max(1, round(frame_width * scale))
+                preview_height = max(1, round(frame_height * scale))
+                preview = cv2.resize(
+                    frame,
+                    (preview_width, preview_height),
+                    interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
+                )
+                sx = preview_width / frame_width
+                sy = preview_height / frame_height
+                preview_objects = [
+                    (
+                        x1 * sx, y1 * sy, x2 * sx, y2 * sy,
+                        track_id, confidence, class_id,
                     )
-                else:
-                    preview = annotated
+                    for x1, y1, x2, y2, track_id, confidence, class_id
+                    in tracked_objects
+                ]
+                preview_stats = dict(display_stats)
+                preview_stats["ui_scale"] = args.ui_scale
+                preview = draw_report(
+                    preview, report, preview_objects, names,
+                    stats=preview_stats,
+                    max_display_objects=args.max_display_objects,
+                )
                 cv2.imshow(window_title, preview)
                 if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
                     break
