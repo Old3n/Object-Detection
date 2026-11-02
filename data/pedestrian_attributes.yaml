@@ -1,0 +1,33 @@
+# Dataset layout (create these directories and populate them with images/labels):
+#
+# datasets/pedestrian_attributes/
+#   images/
+#     train/
+#     val/
+#     test/       # optional
+#   labels/
+#     train/
+#     val/
+#     test/       # optional
+#
+# Each image needs a matching YOLO-format .txt annotation file.
+# Each annotation line: class_id x_center y_center width height
+# Coordinates are normalized to the range 0..1.
+#
+# Label policy: use ONE class per person bounding box. To resolve overlaps,
+# apply this priority: person_with_wheelchair > child > elderly_person >
+# woman > other_person. "woman" therefore means an adult woman who does not
+# meet one of the higher-priority categories. This keeps YOLO's single-label
+# detection classes mutually exclusive.
+
+path: datasets/pedestrian_attributes
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: child
+  1: woman
+  2: elderly_person
+  3: person_with_wheelchair
+  4: other_person
