@@ -214,7 +214,50 @@ By default the runner writes:
 - `<video>_risk.csv`: frame timestamp, inference/processing latency, risk level, reason and per-object estimates.
 - `<video>_risk.json`: aggregate latency, FPS and risk-frame counts.
 
-Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --half` for CUDA FP16, or `--no-save-video` to skip MP4 output. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --quantize fp16` for CUDA FP16, or `--no-save-video` to skip MP4 output. The preview now includes a readable status header, object/risk list, class counts, and processing metrics. Its display size does not change the resolution of the saved MP4. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+
+## Longer real-world footage: KITTI
+
+The short NVIDIA clip is useful for a smoke test, but for longer continuous driving footage use the KITTI odometry dataset. Sequence `00` contains 4,541 frames (about 7 minutes 34 seconds at the native 10 Hz). KITTI provides the camera recordings as numbered image frames rather than an MP4.
+
+Official download page: https://www.cvlibs.net/datasets/kitti/eval_odometry.php
+
+The grayscale odometry archive is 22 GB. The color archive is 65 GB. KITTI requires registration/login for downloads. For this detector test, the grayscale archive is sufficient; choose sequence `00` and use its `image_0` camera directory. The odometry sequence layout is:
+
+```text
+dataset/
+  sequences/
+    00/
+      image_0/
+      image_1/
+      times.txt
+      calib.txt
+```
+
+Convert the image sequence to MP4 from the repository root:
+
+```powershell
+python tools/kitti_to_video.py \
+  --frames "D:\datasets\KITTI\dataset\sequences\00\image_0" \
+  --output videos/kitti_00.mp4 \
+  --fps 10
+```
+
+Then run the full detection, tracking, and collision-risk pipeline:
+
+```powershell
+python RiskVideoBenchmark.py \
+  --source videos/kitti_00.mp4 \
+  --weights yolo26n.pt \
+  --classes 0 1 2 3 5 7 \
+  --pedestrian-class-ids 0 \
+  --vehicle-class-ids 1 2 3 5 7 \
+  --tracker bytetrack.yaml \
+  --quantize fp16 \
+  --show
+```
+
+The output should be approximately 7.5 minutes. The KITTI odometry recordings are grayscale and run at 10 Hz, so preserve `--fps 10` when converting; changing the playback FPS changes the time base used by TTC estimation. KITTI supplies synchronized camera, LiDAR, GPS/IMU and calibration data, but this converter uses only the selected image stream.
 
 ## CARLA simulation workflow
 
@@ -253,7 +296,7 @@ Useful options:
 python VideoBenchmark.py --source videos/test.mp4 --weights path/to/best.pt --show
 
 # Use FP16 on an NVIDIA GPU
-python VideoBenchmark.py --source videos/test.mp4 --weights path/to/best.pt --device 0 --half
+python VideoBenchmark.py --source videos/test.mp4 --weights path/to/best.pt --device 0 --quantize fp16
 
 # Test only a subset of class IDs (example: child and wheelchair user)
 python VideoBenchmark.py --source videos/test.mp4 --weights path/to/best.pt --classes 0 3
