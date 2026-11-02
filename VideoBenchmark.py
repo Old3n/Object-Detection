@@ -294,10 +294,6 @@ def main() -> int:
             # Optional display is deliberately outside the model latency timer.
             if writer is not None:
                 writer.write(annotated)
-            if args.show:
-                cv2.imshow("YOLO Fixed Video Benchmark (press Q to stop)", annotated)
-                if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
-                    break
 
             frame_elapsed_ms = (time.perf_counter() - frame_read_start) * 1000.0
             end_to_end_ms.append(frame_elapsed_ms)
