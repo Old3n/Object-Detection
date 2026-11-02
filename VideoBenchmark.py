@@ -95,9 +95,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def is_cuda_device(device: str) -> bool:
+    """Recognize both Ultralytics device syntax (0) and PyTorch syntax (cuda:0)."""
+    if device.startswith("cuda"):
+        return True
+    parts = device.split(",")
+    return bool(parts) and all(part.strip().isdigit() for part in parts)
+
+
 def sync_device(device: str) -> None:
     """Wait for queued CUDA kernels so wall-clock inference timing is accurate."""
-    if device.startswith("cuda") and torch.cuda.is_available():
+    if not is_cuda_device(device) or not torch.cuda.is_available():
+        return
+    if device.startswith("cuda:"):
+        index = device.split(":", 1)[1].split(",", 1)[0]
+        torch.cuda.synchronize(int(index)) if index.isdigit() else torch.cuda.synchronize()
+    elif device.split(",", 1)[0].strip().isdigit():
+        torch.cuda.synchronize(int(device.split(",", 1)[0].strip()))
+    else:
         torch.cuda.synchronize()
 
 
@@ -147,13 +162,13 @@ def main() -> int:
     else:
         device = args.device
 
-    if device.startswith("cuda") and not torch.cuda.is_available():
+    if is_cuda_device(device) and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA was requested but PyTorch cannot access a CUDA GPU. "
             "Install a CUDA-enabled PyTorch build or use --device cpu."
         )
 
-    use_half = bool(args.half and device.startswith("cuda"))
+    use_half = bool(args.half and is_cuda_device(device))
     if args.half and not use_half:
         print("[WARN] --half requested without CUDA; using FP32 on CPU.")
 
@@ -162,6 +177,9 @@ def main() -> int:
         if args.output
         else source.with_name(f"{source.stem}_annotated.mp4")
     )
+    if output == source:
+        raise ValueError("Annotated output path must not overwrite the input video.")
+
     csv_path = (
         args.csv_path.expanduser().resolve()
         if args.csv_path
@@ -320,6 +338,11 @@ def main() -> int:
                     end="",
                     flush=True,
                 )
+
+            if args.show:
+                cv2.imshow("YOLO Fixed Video Benchmark (press Q to stop)", annotated)
+                if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
+                    break
 
     finally:
         cap.release()
