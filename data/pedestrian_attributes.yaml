@@ -1,0 +1,12 @@
+# One class per person; overlap precedence is defined in README.md.
+path: ../datasets/pedestrian_attributes
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: child
+  1: woman
+  2: elderly_person
+  3: person_with_wheelchair
+  4: other_person
