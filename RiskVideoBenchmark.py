@@ -113,8 +113,8 @@ def draw_report(
             (255, 255, 255), thickness, cv2.LINE_AA,
         )
 
-    header_h = round(112 * scale)
-    footer_h = round(76 * scale)
+    header_h = round(145 * scale)
+    footer_h = round(82 * scale)
     panel_w = min(round(410 * scale), round(width * 0.43))
     panel_x = width - panel_w
     footer_y = height - footer_h
@@ -142,32 +142,38 @@ def draw_report(
     conf = float(stats.get("confidence", 0.25))
     raw_detection_count = int(stats.get("raw_detections", len(tracked_objects)))
 
-    title_y = round(32 * scale)
-    detail_y = round(65 * scale)
-    reason_y = round(94 * scale)
-    title = f"ADAS PERCEPTION  |  RISK: {report.level}"
+    title_y = round(30 * scale)
+    detail_y = round(60 * scale)
+    model_y = round(91 * scale)
+    perf_y = round(122 * scale)
+    title = f"ADAS PERCEPTION  |  COLLISION RISK: {report.level}"
     cv2.putText(
-        frame, title, (margin, title_y), font, 0.82 * scale,
+        frame, title, (margin, title_y), font, 0.90 * scale,
         risk_color, thickness + 1, cv2.LINE_AA,
     )
     position = (
         f"FRAME {frame_index:,}/{total_frames:,}  |  "
-        f"VIDEO {timestamp:05.1f}s/{duration:05.1f}s"
+        f"VIDEO {timestamp:05.1f}s / {duration:05.1f}s"
         if total_frames > 0
         else f"FRAME {frame_index:,}  |  VIDEO {timestamp:05.1f}s"
     )
     cv2.putText(
-        frame, position, (margin, detail_y), font, 0.57 * scale,
-        (240, 240, 240), thickness, cv2.LINE_AA,
+        frame, position, (margin, detail_y), font, 0.60 * scale,
+        (245, 245, 245), thickness, cv2.LINE_AA,
+    )
+    model_line = f"MODEL {model_name}  |  TRACKER {tracker_name}  |  DEVICE {device}  |  {precision}"
+    cv2.putText(
+        frame, model_line[:130], (margin, model_y), font, 0.52 * scale,
+        (210, 225, 240), max(1, thickness - 1), cv2.LINE_AA,
     )
     perf = (
-        f"{model_name} | {tracker_name} | {device} {precision} | "
-        f"DET {raw_detection_count} | TRACKED {len(tracked_objects)} | INF {inference_ms:.1f}ms | "
-        f"LOOP {loop_ms:.1f}ms | {fps_now:.1f} FPS | CONF {conf:.2f}"
+        f"DETECTIONS {raw_detection_count}  |  TRACKED {len(tracked_objects)}  |  "
+        f"INFERENCE {inference_ms:.1f} ms  |  LOOP {loop_ms:.1f} ms  |  "
+        f"{fps_now:.1f} FPS  |  CONF {conf:.2f}"
     )
     cv2.putText(
-        frame, perf[:180], (margin, reason_y), font, 0.48 * scale,
-        (210, 220, 230), max(1, thickness - 1), cv2.LINE_AA,
+        frame, perf[:150], (margin, perf_y), font, 0.52 * scale,
+        (235, 235, 235), max(1, thickness - 1), cv2.LINE_AA,
     )
 
     panel_y = header_h + round(8 * scale)
