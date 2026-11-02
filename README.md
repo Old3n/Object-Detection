@@ -1,6 +1,6 @@
-﻿# AutoPilot - Live Object Tracking Benchmark + ADAS Braking
+﻿# AutoPilot - Object Detection, Tracking & ADAS Risk Estimation
 
-Real-time multi-model object tracking benchmark with live HUD comparison and a Level 1 ADAS braking decision module. Switch between YOLO26 variants (nano/small/medium) paired with ByteTrack, OC-SORT, and BoT-SORT trackers using hotkeys - all running on GPU with FP16 inference.
+Real-time multi-model object detection and tracking benchmark with an advisory, track-based collision-risk estimator. Compare YOLO26 variants paired with ByteTrack, OC-SORT, and BoT-SORT.
 
 ## Dependencies
 
@@ -39,45 +39,40 @@ python ModelBenchmark.py
 | `3` | Switch to M3: YOLO26m + BoT-SORT |
 | `W` | Webcam Desk Mode (person, bottle, cup, phone) |
 | `S` | Street Mode (person, bicycle, car, motorcycle, bus, truck, traffic light, stop sign) |
-| `B` | Toggle ADAS Braking Decision Module |
+| `B` | Toggle collision-risk assessment overlay (Street / Pedestrian mode) |
 | `R` | Reset metrics |
 | `Q` | Quit |
 
-## ADAS Braking Decision Module
+## Collision Risk Assessment
 
-Toggle with `S` (Street Mode) then `B` to enable. The module evaluates tracked objects and issues braking commands using three independent threat detectors:
+Press `B` in Street Mode or Pedestrian Attribute Mode to enable the visual risk overlay. The estimator consumes tracked detections and provides four advisory levels:
 
-### Threat Detection Rules
+| Level | Meaning |
+|---|---|
+| `CLEAR` | No elevated risk estimated from the currently tracked objects |
+| `CAUTION` | Approximate TTC is 3–5 seconds, or a track is predicted to enter the ego corridor |
+| `HIGH` | Approximate TTC is 1.5–3 seconds |
+| `CRITICAL` | Approximate TTC is 1.5 seconds or less |
 
-| Rule | Trigger | Command |
-|------|---------|---------|
-| **Proximity Brake** | Object bounding box fills >35% (pedestrian) or >45% (vehicle) of frame height while inside the ego-lane | `EMERGENCY BRAKE!` |
-| **TTC Brake** | Bounding box growth rate yields Time-To-Collision < 2.0 seconds | `BRAKE - LOW TTC!` |
-| **Cut-In Brake** | Object's lateral velocity predicts it will enter the ego-lane within 0.8 seconds | `BRAKE - CUT-IN!` |
-| **Sign Detection** | Stop sign or traffic light detected in frame | `SLOW - SIGN AHEAD` |
-| **Caution** | Object approaching but not yet at emergency threshold (>21% pedestrian / >27% vehicle) | `CAUTION - CLOSING` |
+### Estimation method
 
-### Threat Levels
+- **Track history:** maintains timestamped normalized bounding-box width and horizontal position per tracker ID.
+- **Apparent-expansion TTC:** fits a line to log(box width) over time. For positive expansion slope (s), the approximate TTC is (1/s). The estimate is withheld until enough history is available.
+- **Cut-in estimate:** extrapolates normalized horizontal track motion and checks whether the projected bottom-center enters the configured ego corridor within one second.
+- **Resolution-independent geometry:** the default trapezoid is normalized to image coordinates, so it scales to the actual frame dimensions.
+- **Stale-track cleanup:** track history is discarded after the track has been absent for one second.
 
-- **Level 0 (CRUISE)** - Small green pill indicator in top-right corner. No threats detected.
-- **Level 1 (CAUTION)** - Orange banner. Object closing in or sign detected.
-- **Level 2 (EMERGENCY)** - Full-width red banner with threat highlighted. Brake immediately.
+The default corridor is a configurable image-space region. It is **not lane detection**. Replace it with a calibrated lane polygon or a lane model before interpreting it as the vehicle's actual path.
 
-### Visual Overlays
+### Important limitations
 
-- **Yellow trapezoid** - Ego-lane projection zone
-- **Red dashed line** - Critical proximity boundary
-- **Red filled box** - Object triggering emergency brake
-- **Orange box** - Object triggering caution
-- **Orange arrow** - Predicted cut-in trajectory
+This is an experimental visual risk estimator, not a braking controller and not a validated AEB function. Bounding-box expansion is affected by camera motion, object orientation, detector jitter, occlusion, and tracker ID switches. It does not provide metric distance, relative speed in m/s, road friction, stopping distance, or vehicle dynamics. The TTC value must be treated as an approximate research signal, not a guaranteed time-to-collision. The overlay does not send commands to the car.
 
-### Design Notes
+The estimator is covered by unit tests:
 
-- Pedestrians trigger at a **lower threshold** than vehicles (brake sooner for people)
-- Proximity detection is the **primary** brake trigger (simple, reliable, no history needed)
-- TTC from bounding box growth is a **secondary** trigger (needs 5+ frames of tracking history)
-- Only active in **Street Mode** - ego-lane detection does not apply to Webcam Desk Mode
-- Expanded class list in braking mode adds traffic light (class 9) and stop sign (class 11)
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 
@@ -163,7 +158,7 @@ The existing webcam monitor can load the custom checkpoint without confusing its
 python ModelBenchmark.py --pedestrian-weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
 ```
 
-Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the ADAS overlay while in that mode. All five custom person classes are passed to the pedestrian braking rules; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
+Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the collision-risk overlay while in that mode. All five custom person classes are passed to the pedestrian risk estimator; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
 
 ## Fixed-video inference and benchmark
 
