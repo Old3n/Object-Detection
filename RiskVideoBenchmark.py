@@ -365,6 +365,8 @@ def main() -> int:
     if not capture.isOpened():
         raise RuntimeError(f"OpenCV could not open video: {source}")
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration_seconds = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if width <= 0 or height <= 0:
@@ -453,8 +455,29 @@ def main() -> int:
             report = assessor.update(
                 tracked_objects, frame.shape, timestamp=video_timestamp
             )
-            annotated = draw_report(frame, report, tracked_objects, names)
             frame_count += 1
+            loop_ms = (time.perf_counter() - frame_start) * 1000.0
+            elapsed_so_far = max(time.perf_counter() - start, 1e-6)
+            current_fps = frame_count / elapsed_so_far
+            display_stats = {
+                "frame": frame_count,
+                "total_frames": total_frames,
+                "video_seconds": video_timestamp,
+                "duration_seconds": duration_seconds,
+                "inference_ms": inference_ms,
+                "loop_ms": loop_ms,
+                "fps": current_fps,
+                "model": Path(weights_ref).name if Path(weights_ref).is_file() else weights_ref,
+                "tracker": args.tracker,
+                "device": device,
+                "precision": "FP16" if use_fp16 else "FP32",
+                "confidence": args.conf,
+            }
+            annotated = draw_report(
+                frame, report, tracked_objects, names,
+                stats=display_stats,
+                max_display_objects=args.max_display_objects,
+            )
             detection_total += len(tracked_objects)
             inference_times.append(inference_ms)
             risk_frames.update([report.level])
@@ -535,7 +558,11 @@ def main() -> int:
         "tracker": args.tracker,
         "device": device,
         "precision": "fp16" if use_fp16 else "fp32",
-        "video": {"width": width, "height": height, "fps": fps},
+        "video": {
+            "width": width, "height": height, "fps": fps,
+            "metadata_frames": total_frames,
+            "metadata_duration_seconds": duration_seconds,
+        },
         "frames": frame_count,
         "tracked_detections": detection_total,
         "average_detections_per_frame": detection_total / frame_count,
