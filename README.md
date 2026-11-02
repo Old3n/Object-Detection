@@ -289,85 +289,88 @@ Each run writes an annotated MP4, per-frame CSV and JSON summary. The CSV includ
 
 ## Live testing with webcams and in-car cameras
 
-\`RiskVideoBenchmark.py\` accepts three source types:
+\`RiskVideoBenchmark.py\` accepts local video paths, USB camera indices, and RTSP/HTTP network streams. On Windows it tries multiple capture backends automatically: Media Foundation (MSMF), DirectShow, then OpenCV's automatic backend. An explicitly selected backend is tried first, with fallbacks if it fails.
 
-- A local video path, such as \`videos/video_0001.mp4\`.
-- A USB camera index, such as \`0\` or \`1\`.
-- An RTSP/HTTP stream URL from an IP camera.
+### 1. Find the correct camera index
 
-### USB webcam
-
-On Windows, test camera index 0 using DirectShow:
+Do not assume the laptop webcam is index 0. First close Windows Camera, Teams, Zoom, Discord, browsers and other apps that may be holding the camera, then run:
 
 \`\`\`powershell
-python RiskVideoBenchmark.py \`
-  --source 0 \`
-  --weights yolo26n.pt \`
-  --device 0 \`
-  --quantize fp16 \`
-  --camera-backend dshow \`
-  --capture-width 1280 \`
-  --capture-height 720 \`
-  --max-seconds 120 \`
-  --show
+python tools/list_cameras.py --max-index 8 --backends msmf dshow auto --preview
 \`\`\`
 
-If DirectShow cannot open the webcam, try Media Foundation:
+The script prints the working device index, backend, resolution and reported FPS. Press Q in a preview to probe the next index. If it finds the laptop webcam at index 1, use \`--source 1\`.
+
+If no camera is found:
+
+- Open the Windows Camera app and verify the webcam itself works.
+- Go to Settings → Privacy & security → Camera.
+- Turn on Camera access and Let desktop apps access your camera.
+- Check the physical camera shutter / Fn camera switch and Device Manager → Cameras.
+- Close any app that might already be using the webcam.
+
+### 2. Run the laptop webcam
+
+Use the index found by \`tools/list_cameras.py\` (example index 0):
 
 \`\`\`powershell
-python RiskVideoBenchmark.py --source 0 --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend msmf --max-seconds 120 --show
+python RiskVideoBenchmark.py --source 0 --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend auto --capture-width 1280 --capture-height 720 --max-seconds 120 --show --ui-scale 1.3
 \`\`\`
 
-For another USB camera, use its device index (for example, \`--source 1\`). The camera must be exposed to Windows as a video-capture device.
+The runner automatically tries MSMF, DirectShow and OpenCV's automatic backend. Its startup output reports the backend that actually opened the camera.
 
-### USB camera with pedestrian attributes
+### 3. Use an Android phone with DroidCam
 
-After training the JAAD pedestrian checkpoint, run both detectors together:
+**Recommended: use the current DroidCam Windows client as a virtual webcam.**
+
+1. Install the phone app and the Windows client from [DroidCam for Windows](https://droidcam.app/windows/).
+2. Connect the phone and laptop to the same Wi-Fi network.
+3. Open DroidCam on the phone.
+4. In the Windows client, click the centre or right-click and choose Add → DroidCam, refresh the device list, then add the phone.
+5. Confirm the phone picture appears in the client. Windows apps should then see a webcam named \`DroidCam Video\`.
+6. Find its OpenCV index:
 
 \`\`\`powershell
-python RiskVideoBenchmark.py \`
-  --source 0 \`
-  --weights yolo26n.pt \`
-  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
-  --classes 2 5 7 9 \`
-  --tracker bytetrack.yaml \`
-  --device 0 \`
-  --quantize fp16 \`
-  --camera-backend dshow \`
-  --max-seconds 120 \`
-  --show
+python tools/list_cameras.py --max-index 12 --backends msmf dshow auto --preview
 \`\`\`
 
-The general COCO model detects cars (2), buses (5), trucks (7), and traffic lights (9). The custom model detects child, woman, elderly person, person-with-wheelchair (only if separately trained with wheelchair examples), and other person.
-
-Without \`--pedestrian-weights\`, the COCO model detects only a generic person category; it cannot distinguish child, woman, or elderly person.
-
-### IP / Wi-Fi camera (RTSP or HTTP)
-
-Use the RTSP/HTTP stream URL supplied by the camera or its configuration application:
+7. Use the index printed for DroidCam. For example, if it is index 2:
 
 \`\`\`powershell
-python RiskVideoBenchmark.py \`
-  --source "rtsp://USERNAME:PASSWORD@CAMERA_IP:554/STREAM_PATH" \`
-  --weights yolo26n.pt \`
-  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
-  --classes 2 5 7 9 \`
-  --device 0 \`
-  --quantize fp16 \`
-  --camera-backend ffmpeg \`
-  --max-seconds 180 \`
-  --show
+python RiskVideoBenchmark.py --source 2 --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend auto --capture-width 1280 --capture-height 720 --max-seconds 300 --show --ui-scale 1.3
 \`\`\`
 
-Replace the URL with the actual stream address for your camera. Do not assume every V380 model uses the same RTSP path. Avoid publishing a URL containing camera credentials.
+DroidCam's current Windows client documents adding the phone from the client and exposing it to applications as \`DroidCam Video\`. The phone and PC must be on the same network for Wi-Fi discovery. See [DroidCam Windows setup](https://droidcam.app/windows/).
 
-For live sources, \`--max-seconds\` stops the capture automatically. Press \`Q\` or \`Esc\` in the preview to stop early. By default, each live run writes an MP4, CSV and JSON report under \`runs/live_camera/\`.
+### 4. DroidCam direct IP/MJPEG stream (Android)
 
-### Testing more than one car camera
+If your DroidCam app has an **IP Cam** mode that displays a phone IP address and port, you can bypass the virtual webcam driver:
 
-Run each camera index or stream URL as a separate test. For example, use \`--source 0\` for the front USB camera and \`--source 1\` for a second USB camera. This version processes one feed per process; it does not yet synchronize or fuse several camera streams into one shared vehicle coordinate system. Use the front-facing camera for lane detection and ego-lane risk assessment.
+1. Start IP Cam mode on the phone.
+2. From the laptop, open \`http://PHONE_IP:PORT\` in a browser to check that the stream is reachable.
+3. Use the MJPEG endpoint \`/video\` as the OpenCV source:
 
-A camera module must be available to Windows as a USB video device or network stream. A bare image sensor that is not exposed through a capture interface cannot be opened directly by OpenCV.
+\`\`\`powershell
+python RiskVideoBenchmark.py --source "http://192.168.1.50:4747/video" --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend ffmpeg --max-seconds 300 --show --ui-scale 1.3
+\`\`\`
+
+Replace the example IP and port with the values displayed by your phone. If you have DroidCamX and the app supports the resolution override, its documented form is \`http://PHONE_IP:PORT/video/force/1280x720\`. The IP Cam / MJPEG method is documented for the Android classic app; use the virtual webcam route if your app does not show IP Cam mode.
+
+### 5. DroidCam over USB
+
+For the classic Android DroidCam USB connection, enable USB debugging in Android Developer Options, connect with a data-capable cable, install the phone manufacturer's USB/ADB drivers if needed, approve the USB-debugging prompt, then choose USB in the DroidCam PC client and refresh the device list. The phone may need USB mode set to PTP, Camera, or Charging. After it appears as a Windows camera, run \`tools/list_cameras.py\` and use the detected index.
+
+### 6. In-car camera inputs
+
+- USB UVC camera: use the index reported by \`tools/list_cameras.py\`.
+- DroidCam phone: use its virtual-camera index or its IP/MJPEG URL.
+- IP camera: use the actual RTSP or HTTP URL supplied by that camera.
+
+For RTSP/HTTP streams, use \`--camera-backend ffmpeg\` or \`auto\`. A sample URL is only a template; camera models and firmware use different stream paths. Do not publish URLs containing camera credentials.
+
+Each live run accepts \`--max-seconds\` to stop automatically and saves an MP4, CSV and JSON under \`runs/live_camera/\`. Press Q or Esc to stop the preview early.
+
+**One feed per process:** this runner tests one camera source at a time. It does not yet synchronize multiple cameras or fuse them into a shared vehicle coordinate system. For lane detection and ego-lane risk estimation, use a forward-facing camera mounted securely and aligned with the vehicle. This is a research prototype; do not interact with the phone or laptop while driving.
 
 ## Fixed-video inference and benchmark
 
