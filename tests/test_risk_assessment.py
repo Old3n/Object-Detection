@@ -5,6 +5,7 @@ import numpy as np
 
 from adas.lane_detection import LaneDetector
 from adas.risk_assessment import CAUTION, CLEAR, HIGH, CollisionRiskAssessor
+from tools.prepare_jaad_dataset import class_for_person
 
 
 class CollisionRiskAssessorTests(unittest.TestCase):
@@ -147,6 +148,13 @@ class CollisionRiskAssessorTests(unittest.TestCase):
         detector.detect(np.zeros_like(frame))
         expired = detector.detect(np.zeros_like(frame))
         self.assertEqual(expired.status, "NOT_DETECTED")
+
+    def test_jaad_demographics_map_to_requested_person_classes(self):
+        self.assertEqual(class_for_person({"age": "child", "gender": "n/a"}), 0)
+        self.assertEqual(class_for_person({"age": "adult", "gender": "female"}), 1)
+        self.assertEqual(class_for_person({"age": "senior", "gender": "female"}), 2)
+        self.assertEqual(class_for_person({"age": "adult", "gender": "male"}), 4)
+        self.assertEqual(class_for_person(None), 4)
 
 
 if __name__ == "__main__":
