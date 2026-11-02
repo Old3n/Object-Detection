@@ -13,10 +13,9 @@ try:
 except ImportError:
     HAS_BOXMOT = False
 
-# COCO class subsets
-WEBCAM_DESK_CLASSES = [0, 39, 41, 67]        # person, bottle, cup, cell phone
-IRAN_STREET_CLASSES = [0, 1, 2, 3, 5, 7]     # person, bicycle, car, motorcycle, bus, truck
-ROAD_AND_CROSSROAD_CLASSES = [0, 1, 2, 3, 5, 7, 9, 11]  # vehicles + traffic light (9), stop sign (11)
+WEBCAM_DESK_CLASSES = [0, 39, 41, 67]
+IRAN_STREET_CLASSES = [0, 1, 2, 3, 5, 7]
+ROAD_AND_CROSSROAD_CLASSES = [0, 1, 2, 3, 5, 7, 9, 11]
 PEDESTRIAN_ATTRIBUTE_CLASSES = [0, 1, 2, 3, 4]  # child, woman, elderly, wheelchair user, other person
 EXPECTED_PEDESTRIAN_NAMES = {
     0: "child",
@@ -25,7 +24,6 @@ EXPECTED_PEDESTRIAN_NAMES = {
     3: "person_with_wheelchair",
     4: "other_person",
 }
-
 
 def write_tracker_yamls():
     bytetrack_cfg = {
@@ -55,7 +53,6 @@ def write_tracker_yamls():
     with open("iran_botsort.yaml", "w") as f:
         yaml.dump(botsort_cfg, f)
 
-
 class BrakingDecisionController:
     """Level 1 ADAS braking decision module.
 
@@ -73,7 +70,6 @@ class BrakingDecisionController:
         self.ttc_thresh = ttc_brake_thresh
         self.track_history = defaultdict(lambda: deque(maxlen=10))
 
-        # Ego-lane polygon (trapezoidal corridor)
         self.ego_polygon = np.array([
             [int(0.30 * frame_w), int(0.40 * frame_h)],
             [int(0.70 * frame_w), int(0.40 * frame_h)],
@@ -81,7 +77,6 @@ class BrakingDecisionController:
             [int(0.05 * frame_w), int(0.95 * frame_h)],
         ], np.int32)
 
-        # Fraction of frame height occupied by bbox to trigger proximity alert
         self.proximity_thresh_pedestrian = 0.35
         self.proximity_thresh_vehicle = 0.45
         self.critical_y_line = int(0.75 * frame_h)
@@ -110,13 +105,11 @@ class BrakingDecisionController:
         trigger_reason = ""
         threat_level = 0
 
-        # Render ego-lane overlay
         overlay = frame.copy()
         cv2.fillPoly(overlay, [self.ego_polygon], (255, 255, 0))
         cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
         cv2.polylines(frame, [self.ego_polygon], isClosed=True, color=(0, 255, 255), thickness=2)
 
-        # Critical proximity boundary line
         dash_len = 20
         x_start = int(0.05 * self.w)
         x_end = int(0.95 * self.w)
@@ -139,14 +132,12 @@ class BrakingDecisionController:
             is_sign = cls_id in self.SIGN_CLASSES
             in_lane = self.in_ego_lane(bottom_center_x, bottom_y)
 
-            # Rule 0: Traffic signs / signals
             if is_sign and box_h_ratio > 0.06:
                 if threat_level < 1:
                     command = "SLOW - SIGN AHEAD"
                     trigger_reason = f"{'Stop Sign' if cls_id == 11 else 'Traffic Light'} (ID {tid})"
                     threat_level = 1
 
-            # Rule 1: Proximity threshold
             if in_lane and (is_pedestrian or is_vehicle):
                 prox_thresh = self.proximity_thresh_pedestrian if is_pedestrian else self.proximity_thresh_vehicle
                 if box_h_ratio > prox_thresh:
@@ -167,7 +158,6 @@ class BrakingDecisionController:
                         threat_level = 1
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 165, 255), 3)
 
-            # Rule 2: Time-To-Collision (optical expansion)
             if in_lane and len(hist) >= 5 and threat_level < 2:
                 t_old, w_old, x_old, y_old = hist[0]
                 dt = max(now - t_old, 1e-3)
@@ -181,7 +171,6 @@ class BrakingDecisionController:
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 3)
                         break
 
-            # Rule 3: Lateral cut-in trajectory projection (0.8s lookahead)
             if not in_lane and len(hist) >= 5 and threat_level < 2:
                 t_old, w_old, x_old, y_old = hist[0]
                 dt = max(now - t_old, 1e-3)
@@ -200,7 +189,6 @@ class BrakingDecisionController:
         self.last_reason = trigger_reason
         self.threat_level = threat_level
 
-        # HUD threat display
         if threat_level == 2:
             cv2.rectangle(frame, (0, 86), (self.w, 135), (0, 0, 255), -1)
             cv2.putText(frame, f"!! {command}  {trigger_reason}", (15, 122),
@@ -216,7 +204,6 @@ class BrakingDecisionController:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
 
         return command, trigger_reason, frame
-
 
 class LiveMonitorBenchmark:
     def __init__(self, camera_id=0, pedestrian_weights=None):
@@ -449,7 +436,6 @@ class LiveMonitorBenchmark:
             col = (0, 255, 255) if slot == self.active_slot else (200, 200, 200)
             row_txt = f"{prefix}{m_title:<26} | FPS: {s['fps']:5.1f} | GPU Latency: {s['ms']:5.1f}ms | Unique IDs: {s['unique_ids']:4d} | Stability: {s['avg_lifespan']:5.0f}f"
             cv2.putText(frame, row_txt, (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.52, col, 1 if slot != self.active_slot else 2)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
