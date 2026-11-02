@@ -75,6 +75,26 @@ class CollisionRiskAssessorTests(unittest.TestCase):
         self.assertEqual(report.level, CAUTION)
         self.assertIsNotNone(report.objects[0].cut_in_eta_seconds)
 
+    def test_stale_track_history_is_discarded(self):
+        assessor = CollisionRiskAssessor(min_history_seconds=0.2, stale_track_seconds=0.5)
+        report = None
+        for index in range(7):
+            timestamp = index * 0.1
+            box_width = 100.0 * math.exp(0.5 * timestamp)
+            report = assessor.update(
+                [(640 - box_width / 2, 300, 640 + box_width / 2, 620, 9, 0.95, 0)],
+                (720, 1280),
+                timestamp=timestamp,
+            )
+        self.assertIsNotNone(report.objects[0].ttc_seconds)
+
+        report = assessor.update(
+            [(500, 300, 600, 620, 9, 0.95, 0)],
+            (720, 1280),
+            timestamp=2.0,
+        )
+        self.assertIsNone(report.objects[0].ttc_seconds)
+
 
 if __name__ == "__main__":
     unittest.main()
