@@ -92,12 +92,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use FP16 inference (CUDA only).",
     )
-    parser.add_argument(
-        "--no- half",
-        dest="unused_no_half",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
     return parser.parse_args()
 
 
@@ -215,13 +209,13 @@ def main() -> int:
     frame_rows: list[dict[str, Any]] = []
     inference_ms: list[float] = []
     end_to_end_ms: list[float] = []
-    detections_per_frame: list[int] = []
     aggregate_classes: Counter[str] = Counter()
     measured_frames = 0
     warmup_frames_done = 0
     total_detections = 0
     start_all = time.perf_counter()
     measured_start: float | None = None
+    source_frame = 0
 
     print(
         f"[INFO] Video: {width}x{height} @ "
@@ -238,11 +232,13 @@ def main() -> int:
             ok, frame = cap.read()
             if not ok:
                 break
+            source_frame += 1
 
             # Warm-up calls compile kernels and initialize CUDA/cuDNN paths.
-            # They are excluded from all reported measurements.
+            # They are excluded from metrics, but are still written so the
+            # annotated output retains the complete source video.
             if warmup_frames_done < args.warmup:
-                _ = model.predict(
+                warmup_result = model.predict(
                     frame,
                     imgsz=args.imgsz,
                     conf=args.conf,
@@ -251,8 +247,10 @@ def main() -> int:
                     half=use_half,
                     classes=args.classes,
                     verbose=False,
-                )
+                )[0]
                 sync_device(device)
+                if writer is not None:
+                    writer.write(warmup_result.plot())
                 warmup_frames_done += 1
                 continue
 
@@ -291,7 +289,6 @@ def main() -> int:
             measured_frames += 1
             total_detections += detection_count
             inference_ms.append(inference_duration_ms)
-            detections_per_frame.append(detection_count)
             aggregate_classes.update(class_counts)
 
             # Optional display is deliberately outside the model latency timer.
@@ -306,7 +303,7 @@ def main() -> int:
             end_to_end_ms.append(frame_elapsed_ms)
             frame_rows.append(
                 {
-                    "frame": measured_frames,
+                    "frame": source_frame,
                     "inference_ms": round(inference_duration_ms, 4),
                     "frame_processing_ms": round(frame_elapsed_ms, 4),
                     "detections": detection_count,
