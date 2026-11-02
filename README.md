@@ -287,6 +287,88 @@ Add `-Show` to display each clip while it runs. Results are written separately f
 
 Each run writes an annotated MP4, per-frame CSV and JSON summary. The CSV includes lane state/confidence as well as detections, tracking, object risk, and TTC estimates. Use the CSV/JSON files to compare clips; inference FPS and risk labels are not accuracy metrics by themselves.
 
+## Live testing with webcams and in-car cameras
+
+\`RiskVideoBenchmark.py\` accepts three source types:
+
+- A local video path, such as \`videos/video_0001.mp4\`.
+- A USB camera index, such as \`0\` or \`1\`.
+- An RTSP/HTTP stream URL from an IP camera.
+
+### USB webcam
+
+On Windows, test camera index 0 using DirectShow:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source 0 \`
+  --weights yolo26n.pt \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend dshow \`
+  --capture-width 1280 \`
+  --capture-height 720 \`
+  --max-seconds 120 \`
+  --show
+\`\`\`
+
+If DirectShow cannot open the webcam, try Media Foundation:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py --source 0 --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend msmf --max-seconds 120 --show
+\`\`\`
+
+For another USB camera, use its device index (for example, \`--source 1\`). The camera must be exposed to Windows as a video-capture device.
+
+### USB camera with pedestrian attributes
+
+After training the JAAD pedestrian checkpoint, run both detectors together:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source 0 \`
+  --weights yolo26n.pt \`
+  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
+  --classes 2 5 7 9 \`
+  --tracker bytetrack.yaml \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend dshow \`
+  --max-seconds 120 \`
+  --show
+\`\`\`
+
+The general COCO model detects cars (2), buses (5), trucks (7), and traffic lights (9). The custom model detects child, woman, elderly person, person-with-wheelchair (only if separately trained with wheelchair examples), and other person.
+
+Without \`--pedestrian-weights\`, the COCO model detects only a generic person category; it cannot distinguish child, woman, or elderly person.
+
+### IP / Wi-Fi camera (RTSP or HTTP)
+
+Use the RTSP/HTTP stream URL supplied by the camera or its configuration application:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source "rtsp://USERNAME:PASSWORD@CAMERA_IP:554/STREAM_PATH" \`
+  --weights yolo26n.pt \`
+  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
+  --classes 2 5 7 9 \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend ffmpeg \`
+  --max-seconds 180 \`
+  --show
+\`\`\`
+
+Replace the URL with the actual stream address for your camera. Do not assume every V380 model uses the same RTSP path. Avoid publishing a URL containing camera credentials.
+
+For live sources, \`--max-seconds\` stops the capture automatically. Press \`Q\` or \`Esc\` in the preview to stop early. By default, each live run writes an MP4, CSV and JSON report under \`runs/live_camera/\`.
+
+### Testing more than one car camera
+
+Run each camera index or stream URL as a separate test. For example, use \`--source 0\` for the front USB camera and \`--source 1\` for a second USB camera. This version processes one feed per process; it does not yet synchronize or fuse several camera streams into one shared vehicle coordinate system. Use the front-facing camera for lane detection and ego-lane risk assessment.
+
+A camera module must be available to Windows as a USB video device or network stream. A bare image sensor that is not exposed through a capture interface cannot be opened directly by OpenCV.
+
 ## Fixed-video inference and benchmark
 
 `VideoBenchmark.py` runs a trained YOLO checkpoint on a local video file. It saves an annotated MP4, a per-frame CSV, and a summary JSON by default.
