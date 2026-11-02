@@ -7,6 +7,8 @@ import torch
 import yaml
 from ultralytics import YOLO
 
+from adas.risk_assessment import CLEAR, CAUTION, HIGH, CRITICAL, CollisionRiskAssessor
+
 try:
     from boxmot import OCSORT
     HAS_BOXMOT = True
@@ -53,157 +55,66 @@ def write_tracker_yamls():
     with open("iran_botsort.yaml", "w") as f:
         yaml.dump(botsort_cfg, f)
 
-class BrakingDecisionController:
-    """Level 1 ADAS braking decision module.
+class CollisionRiskOverlay:
+    """Render advisory risk estimates; this class never commands vehicle actuators."""
 
-    Evaluates tracked obstacles in the ego-lane using proximity,
-    Time-To-Collision (TTC), and lateral cut-in estimation.
-    """
+    COLORS = {
+        CLEAR: (0, 150, 0),
+        CAUTION: (0, 165, 255),
+        HIGH: (0, 100, 255),
+        CRITICAL: (0, 0, 255),
+    }
 
-    PEDESTRIAN_CLASSES = {0}
-    VEHICLE_CLASSES = {1, 2, 3, 5, 7}
-    SIGN_CLASSES = {9, 11}
-
-    def __init__(self, frame_w=1280, frame_h=720, ttc_brake_thresh=2.0):
-        self.w = frame_w
-        self.h = frame_h
-        self.ttc_thresh = ttc_brake_thresh
-        self.track_history = defaultdict(lambda: deque(maxlen=10))
-
-        self.ego_polygon = np.array([
-            [int(0.30 * frame_w), int(0.40 * frame_h)],
-            [int(0.70 * frame_w), int(0.40 * frame_h)],
-            [int(0.95 * frame_w), int(0.95 * frame_h)],
-            [int(0.05 * frame_w), int(0.95 * frame_h)],
-        ], np.int32)
-
-        self.proximity_thresh_pedestrian = 0.35
-        self.proximity_thresh_vehicle = 0.45
-        self.critical_y_line = int(0.75 * frame_h)
-
-        self.last_command = "CRUISE"
-        self.last_reason = ""
-        self.threat_level = 0  # 0: clear, 1: caution, 2: emergency
+    def __init__(self):
+        self.assessor = CollisionRiskAssessor()
+        self.last_report = None
 
     def reset(self):
-        self.track_history.clear()
-        self.last_command = "CRUISE"
-        self.last_reason = ""
-        self.threat_level = 0
-
-    def in_ego_lane(self, x, y):
-        return cv2.pointPolygonTest(self.ego_polygon, (float(x), float(y)), False) >= 0
+        self.assessor.reset()
+        self.last_report = None
 
     def evaluate_frame(self, tracked_objects, frame, pedestrian_class_ids=None):
-        pedestrian_classes = (
-            self.PEDESTRIAN_CLASSES
-            if pedestrian_class_ids is None
-            else set(pedestrian_class_ids)
+        height, width = frame.shape[:2]
+        report = self.assessor.update(
+            tracked_objects,
+            frame.shape,
+            pedestrian_class_ids=pedestrian_class_ids,
         )
-        now = time.perf_counter()
-        command = "CRUISE"
-        trigger_reason = ""
-        threat_level = 0
+        self.last_report = report
 
+        corridor = np.array(
+            [(round(x * width), round(y * height)) for x, y in report.corridor],
+            dtype=np.int32,
+        )
         overlay = frame.copy()
-        cv2.fillPoly(overlay, [self.ego_polygon], (255, 255, 0))
-        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
-        cv2.polylines(frame, [self.ego_polygon], isClosed=True, color=(0, 255, 255), thickness=2)
+        cv2.fillPoly(overlay, [corridor], (255, 255, 0))
+        cv2.addWeighted(overlay, 0.06, frame, 0.94, 0, frame)
+        cv2.polylines(frame, [corridor], isClosed=True, color=(0, 255, 255), thickness=2)
 
-        dash_len = 20
-        x_start = int(0.05 * self.w)
-        x_end = int(0.95 * self.w)
-        for x in range(x_start, x_end, dash_len * 2):
-            cv2.line(frame, (x, self.critical_y_line),
-                     (min(x + dash_len, x_end), self.critical_y_line), (0, 0, 255), 2)
+        for item in report.objects:
+            color = self.COLORS[item.level]
+            x1, y1, x2, y2 = (int(value) for value in item.bbox)
+            if item.level != CLEAR:
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                if item.ttc_seconds is not None:
+                    detail = f"TTC~{item.ttc_seconds:.1f}s"
+                elif item.cut_in_eta_seconds is not None:
+                    detail = f"ENTRY~{item.cut_in_eta_seconds:.1f}s"
+                else:
+                    detail = item.level
+                cv2.putText(
+                    frame, f"{item.object_type.upper()} {item.track_id} {detail}",
+                    (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2,
+                )
 
-        for (x1, y1, x2, y2, tid, conf, cls_id) in tracked_objects:
-            box_w = max(x2 - x1, 1.0)
-            box_h = max(y2 - y1, 1.0)
-            bottom_center_x = 0.5 * (x1 + x2)
-            bottom_y = y2
-            box_h_ratio = box_h / self.h
+        banner_color = self.COLORS[report.level]
+        cv2.rectangle(frame, (0, 86), (width, 132), banner_color, -1)
+        cv2.putText(
+            frame, f"COLLISION RISK: {report.level} | {report.reason[:110]}",
+            (12, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2,
+        )
+        return report.level, report.reason, frame
 
-            self.track_history[tid].append((now, box_w, bottom_center_x, bottom_y))
-            hist = self.track_history[tid]
-
-            is_pedestrian = cls_id in pedestrian_classes
-            is_vehicle = cls_id in self.VEHICLE_CLASSES and not is_pedestrian
-            is_sign = cls_id in self.SIGN_CLASSES
-            in_lane = self.in_ego_lane(bottom_center_x, bottom_y)
-
-            if is_sign and box_h_ratio > 0.06:
-                if threat_level < 1:
-                    command = "SLOW - SIGN AHEAD"
-                    trigger_reason = f"{'Stop Sign' if cls_id == 11 else 'Traffic Light'} (ID {tid})"
-                    threat_level = 1
-
-            if in_lane and (is_pedestrian or is_vehicle):
-                prox_thresh = self.proximity_thresh_pedestrian if is_pedestrian else self.proximity_thresh_vehicle
-                if box_h_ratio > prox_thresh:
-                    command = "EMERGENCY BRAKE!"
-                    obj_type = "Pedestrian" if is_pedestrian else "Vehicle"
-                    trigger_reason = f"{obj_type} ID {tid} too close ({box_h_ratio:.0%} of frame)"
-                    threat_level = 2
-                    obj_overlay = frame.copy()
-                    cv2.rectangle(obj_overlay, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), -1)
-                    cv2.addWeighted(obj_overlay, 0.25, frame, 0.75, 0, frame)
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 3)
-                    break
-                elif box_h_ratio > prox_thresh * 0.6:
-                    if threat_level < 1:
-                        command = "CAUTION - CLOSING"
-                        obj_type = "Pedestrian" if is_pedestrian else "Vehicle"
-                        trigger_reason = f"{obj_type} ID {tid} approaching ({box_h_ratio:.0%})"
-                        threat_level = 1
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 165, 255), 3)
-
-            if in_lane and len(hist) >= 5 and threat_level < 2:
-                t_old, w_old, x_old, y_old = hist[0]
-                dt = max(now - t_old, 1e-3)
-                scale_ratio = box_w / max(w_old, 1.0)
-                if scale_ratio > 1.03:
-                    ttc = dt / (scale_ratio - 1.0)
-                    if ttc < self.ttc_thresh:
-                        command = "BRAKE - LOW TTC!"
-                        trigger_reason = f"ID {tid} TTC: {ttc:.1f}s"
-                        threat_level = 2
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 3)
-                        break
-
-            if not in_lane and len(hist) >= 5 and threat_level < 2:
-                t_old, w_old, x_old, y_old = hist[0]
-                dt = max(now - t_old, 1e-3)
-                vx = (bottom_center_x - x_old) / dt
-                future_x = bottom_center_x + (vx * 0.8)
-
-                if bottom_y > int(0.50 * self.h) and self.in_ego_lane(future_x, bottom_y):
-                    if abs(vx) > 50:
-                        command = "BRAKE - CUT-IN!"
-                        trigger_reason = f"ID {tid} cutting into lane!"
-                        threat_level = 2
-                        cv2.arrowedLine(frame, (int(bottom_center_x), int(bottom_y)),
-                                        (int(future_x), int(bottom_y)), (0, 165, 255), 3)
-
-        self.last_command = command
-        self.last_reason = trigger_reason
-        self.threat_level = threat_level
-
-        if threat_level == 2:
-            cv2.rectangle(frame, (0, 86), (self.w, 135), (0, 0, 255), -1)
-            cv2.putText(frame, f"!! {command}  {trigger_reason}", (15, 122),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-        elif threat_level == 1:
-            cv2.rectangle(frame, (0, 86), (self.w, 128), (0, 140, 255), -1)
-            cv2.putText(frame, f">> {command}  {trigger_reason}", (15, 117),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-        else:
-            cv2.rectangle(frame, (self.w - 180, 88), (self.w - 10, 112), (0, 140, 0), -1)
-            cv2.rectangle(frame, (self.w - 180, 88), (self.w - 10, 112), (0, 180, 0), 2)
-            cv2.putText(frame, "ADAS: CRUISE", (self.w - 175, 106),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
-
-        return command, trigger_reason, frame
 
 class LiveMonitorBenchmark:
     def __init__(self, camera_id=0, pedestrian_weights=None):
@@ -256,13 +167,13 @@ class LiveMonitorBenchmark:
         self.active_slot = 1
         self.street_mode = False
         self.pedestrian_mode = False
-        self.braking_enabled = False
+        self.risk_overlay_enabled = False
         self.cap = cv2.VideoCapture(camera_id)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        self.braking_controller = BrakingDecisionController(frame_w=1280, frame_h=720, ttc_brake_thresh=2.0)
+        self.risk_overlay = CollisionRiskOverlay()
 
         self.scoreboard = {
             1: {"fps": 0.0, "ms": 0.0, "unique_ids": 0, "avg_lifespan": 0.0},
@@ -277,7 +188,7 @@ class LiveMonitorBenchmark:
         self.seen_ids = set()
         self.id_frame_counts = defaultdict(int)
         self.trails = defaultdict(lambda: deque(maxlen=30))
-        self.braking_controller.reset()
+        self.risk_overlay.reset()
         if HAS_BOXMOT:
             self.ocsort = OCSORT(det_thresh=0.30, max_age=60, min_hits=2, iou_threshold=0.25)
 
@@ -292,7 +203,7 @@ class LiveMonitorBenchmark:
                 active_classes = PEDESTRIAN_ATTRIBUTE_CLASSES
                 cfg = self.pedestrian_model_cfg
             elif self.street_mode:
-                active_classes = ROAD_AND_CROSSROAD_CLASSES if self.braking_enabled else IRAN_STREET_CLASSES
+                active_classes = ROAD_AND_CROSSROAD_CLASSES if self.risk_overlay_enabled else IRAN_STREET_CLASSES
                 cfg = self.models[self.active_slot]
             else:
                 active_classes = WEBCAM_DESK_CLASSES
@@ -347,11 +258,11 @@ class LiveMonitorBenchmark:
                 for i in range(1, len(pts)):
                     cv2.line(frame, pts[i - 1], pts[i], color, 2)
 
-            if self.braking_enabled and (self.street_mode or self.pedestrian_mode):
+            if self.risk_overlay_enabled and (self.street_mode or self.pedestrian_mode):
                 pedestrian_ids = (
                     PEDESTRIAN_ATTRIBUTE_CLASSES if self.pedestrian_mode else [0]
                 )
-                self.braking_controller.evaluate_frame(
+                self.risk_overlay.evaluate_frame(
                     tracked_objects, frame, pedestrian_class_ids=pedestrian_ids
                 )
 
@@ -395,9 +306,9 @@ class LiveMonitorBenchmark:
                         self.street_mode = False
                     self.reset_current_metrics()
             elif key == ord("b"):
-                self.braking_enabled = not self.braking_enabled
-                if not self.braking_enabled:
-                    self.braking_controller.reset()
+                self.risk_overlay_enabled = not self.risk_overlay_enabled
+                if not self.risk_overlay_enabled:
+                    self.risk_overlay.reset()
             elif key == ord("r"):
                 self.reset_current_metrics()
 
@@ -412,8 +323,8 @@ class LiveMonitorBenchmark:
         else:
             mode_str = "STREET MODE" if self.street_mode else "WEBCAM DESK MODE"
 
-        if self.braking_enabled and (self.street_mode or self.pedestrian_mode):
-            mode_str += " + ADAS BRAKING"
+        if self.risk_overlay_enabled and (self.street_mode or self.pedestrian_mode):
+            mode_str += " + RISK ASSESSMENT"
 
         fps_color = (0, 255, 0) if avg_fps >= 28 else ((0, 200, 255) if avg_fps >= 18 else (0, 0, 255))
 
@@ -423,7 +334,7 @@ class LiveMonitorBenchmark:
                     (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.60, fps_color, 2)
 
         cv2.rectangle(frame, (0, h - 115), (w, h), (15, 15, 15), -1)
-        cv2.putText(frame, "HOTKEYS: [1] M1  [2] M2  [3] M3  |  [W] Webcam  [S] Street  [P] Pedestrian Attributes  [B] Braking ADAS  [R] Reset  [Q] Quit",
+        cv2.putText(frame, "HOTKEYS: [1] M1  [2] M2  [3] M3  |  [W] Webcam  [S] Street  [P] Pedestrian Attributes  [B] Risk Assessment  [R] Reset  [Q] Quit",
                     (15, h - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 180, 180), 1)
 
         for slot in [1, 2, 3]:
