@@ -273,7 +273,7 @@ def main() -> int:
                 continue
 
             if measured_start is None:
-                measured_start = time.perf_counter()
+                measured_start = frame_read_start
 
             sync_device(device)
             inference_start = time.perf_counter()
