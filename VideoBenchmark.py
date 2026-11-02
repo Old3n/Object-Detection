@@ -252,9 +252,7 @@ def main() -> int:
                 break
             source_frame += 1
 
-            # Warm-up calls compile kernels and initialize CUDA/cuDNN paths.
-            # They are excluded from metrics, but are still written so the
-            # annotated output retains the complete source video.
+            # Keep warm-up frames in output but exclude them from timed metrics.
             if warmup_frames_done < args.warmup:
                 warmup_result = model.predict(
                     frame,
@@ -309,7 +307,6 @@ def main() -> int:
             inference_ms.append(inference_duration_ms)
             aggregate_classes.update(class_counts)
 
-            # Optional display is deliberately outside the model latency timer.
             if writer is not None:
                 writer.write(annotated)
 
