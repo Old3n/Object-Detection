@@ -54,6 +54,36 @@ def sync_cuda(device: str) -> None:
         torch.cuda.synchronize(int(index)) if index.isdigit() else torch.cuda.synchronize()
 
 
+
+def resolve_source(value: str) -> tuple[bool, int | str, str, Path | None]:
+    """Resolve a local video path, USB camera index, or network stream URL."""
+    raw = value.strip()
+    if raw.isdigit():
+        index = int(raw)
+        return True, index, f"camera_{index}", None
+    if raw.lower().startswith(("rtsp://", "rtsps://", "http://", "https://")):
+        return True, raw, "network_camera", None
+    path = Path(raw).expanduser().resolve()
+    return False, str(path), path.stem, path
+
+
+def open_capture(
+    source: int | str,
+    backend_name: str,
+) -> cv2.VideoCapture:
+    """Open an OpenCV source using the selected capture backend."""
+    backend_map = {
+        "auto": cv2.CAP_ANY,
+        "dshow": cv2.CAP_DSHOW,
+        "msmf": cv2.CAP_MSMF,
+        "ffmpeg": cv2.CAP_FFMPEG,
+    }
+    backend = backend_map[backend_name]
+    if isinstance(source, int) and backend_name == "auto":
+        return cv2.VideoCapture(source)
+    return cv2.VideoCapture(source, backend)
+
+
 def _blend_panel(frame: Any, x1: int, y1: int, x2: int, y2: int, alpha: float = 0.82) -> None:
     """Draw a dark translucent panel without hiding all underlying footage."""
     overlay = frame.copy()
@@ -298,7 +328,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark YOLO tracking and collision-risk assessment on a video."
     )
-    parser.add_argument("--source", required=True, type=Path, help="Input video.")
+    parser.add_argument(
+        "--source", required=True, type=str,
+        help="Video path, USB camera index (0, 1, ...), or RTSP/HTTP camera URL.",
+    )
     parser.add_argument(
         "--weights",
         required=True,
@@ -336,6 +369,24 @@ def parse_args() -> argparse.Namespace:
         help="Class IDs treated as vehicles by the risk estimator.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="Stop live camera/stream capture after this many seconds.",
+    )
+    parser.add_argument(
+        "--camera-backend", choices=("auto", "dshow", "msmf", "ffmpeg"),
+        default="auto", help="OpenCV capture backend (Windows: try dshow or msmf).",
+    )
+    parser.add_argument("--capture-width", type=int, default=0)
+    parser.add_argument("--capture-height", type=int, default=0)
+    parser.add_argument(
+        "--capture-fps", type=float, default=0.0,
+        help="Request a camera FPS; 0 leaves the camera default unchanged.",
+    )
+    parser.add_argument(
+        "--live-fps", type=float, default=30.0,
+        help="Fallback FPS for live sources that do not report their FPS.",
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--csv", dest="csv_path", type=Path, default=None)
     parser.add_argument("--json", dest="json_path", type=Path, default=None)
@@ -363,13 +414,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    source = args.source.expanduser().resolve()
+    is_live, capture_source, source_label, source_path = resolve_source(args.source)
+    source_display = source_label if is_live else str(source_path)
     weights_path = Path(args.weights).expanduser()
     weights_ref = str(weights_path.resolve()) if weights_path.is_file() else args.weights
-    if not source.is_file():
-        raise FileNotFoundError(f"Input video not found: {source}")
+    if not is_live and (source_path is None or not source_path.is_file()):
+        raise FileNotFoundError(f"Input video not found: {source_path}")
     if args.imgsz < 32 or args.max_frames is not None and args.max_frames < 1:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        raise ValueError("--max-seconds must be positive.")
+    if args.capture_width < 0 or args.capture_height < 0 or args.capture_fps < 0 or args.live_fps <= 0:
+        raise ValueError("Capture width/height/FPS cannot be negative and --live-fps must be positive.")
     if args.display_width < 1 or args.display_height < 1:
         raise ValueError("--display-width and --display-height must be positive.")
     if args.max_display_objects < 1:
@@ -390,32 +446,54 @@ def main() -> int:
     if args.quantize == "fp16" and not wants_cuda:
         print("[WARN] FP16 requested without CUDA; using FP32.")
 
+    live_stamp = time.strftime("%Y%m%d_%H%M%S")
+    if is_live:
+        default_stem = Path("runs/live_camera") / f"{source_label}_{live_stamp}_risk"
+    else:
+        default_stem = source_path.with_name(f"{source_path.stem}_risk")
     output = (
         args.output.expanduser().resolve()
         if args.output
-        else source.with_name(f"{source.stem}_risk.mp4")
+        else default_stem.with_suffix(".mp4").resolve()
     )
     csv_path = (
         args.csv_path.expanduser().resolve()
         if args.csv_path
-        else source.with_name(f"{source.stem}_risk.csv")
+        else default_stem.with_suffix(".csv").resolve()
     )
     json_path = (
         args.json_path.expanduser().resolve()
         if args.json_path
-        else source.with_name(f"{source.stem}_risk.json")
+        else default_stem.with_suffix(".json").resolve()
     )
-    if output == source:
+    if not is_live and output == source_path:
         raise ValueError("Output video cannot overwrite the input video.")
     for path in (output, csv_path, json_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    capture = cv2.VideoCapture(str(source))
+    capture = open_capture(capture_source, args.camera_backend)
     if not capture.isOpened():
-        raise RuntimeError(f"OpenCV could not open video: {source}")
+        raise RuntimeError(
+            f"OpenCV could not open source '{source_display}'. "
+            "For USB cameras try --camera-backend dshow or msmf; "
+            "for IP cameras check the RTSP/HTTP URL and stream credentials."
+        )
+    if args.capture_width > 0:
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.capture_width)
+    if args.capture_height > 0:
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.capture_height)
+    if args.capture_fps > 0:
+        capture.set(cv2.CAP_PROP_FPS, args.capture_fps)
+    if is_live:
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    if is_live and fps <= 0:
+        fps = args.capture_fps or args.live_fps
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration_seconds = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
+    duration_seconds = total_frames / fps if fps > 0 and total_frames > 0 else (
+        args.max_seconds or 0.0
+    )
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if width <= 0 or height <= 0:
@@ -522,8 +600,10 @@ def main() -> int:
     lane_status_frames: Counter[str] = Counter()
     lane_confidences: list[float] = []
     start = time.perf_counter()
+    live_start = start
 
-    print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
+    print(f"[INFO] Source: {source_display} ({"LIVE" if is_live else "FILE"})")
+    print(f"[INFO] Capture: {width}x{height} @ {fps:.3f} FPS")
     print(f"[INFO] Model: {weights_ref}")
     print(f"[INFO] Device: {device}, precision: {'FP16' if use_fp16 else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
@@ -533,7 +613,14 @@ def main() -> int:
         cv2.namedWindow(window_title, cv2.WINDOW_AUTOSIZE)
 
     try:
-        while args.max_frames is None or frame_count < args.max_frames:
+        while (
+            (args.max_frames is None or frame_count < args.max_frames)
+            and (
+                args.max_seconds is None
+                or not is_live
+                or time.perf_counter() - live_start < args.max_seconds
+            )
+        ):
             frame_start = time.perf_counter()
             ok, frame = capture.read()
             if not ok:
@@ -620,7 +707,11 @@ def main() -> int:
                 if lane_estimate.status in {"DETECTED", "TRACKED"}
                 else None
             )
-            video_timestamp = frame_count / fps if fps > 0 else time.monotonic()
+            video_timestamp = (
+                time.perf_counter() - live_start
+                if is_live
+                else (frame_count / fps if fps > 0 else time.monotonic())
+            )
             report = assessor.update(
                 tracked_objects,
                 frame.shape,
@@ -635,6 +726,8 @@ def main() -> int:
                 "frame": frame_count,
                 "total_frames": total_frames,
                 "video_seconds": video_timestamp,
+                "live": is_live,
+                "source_label": source_label,
                 "duration_seconds": duration_seconds,
                 "inference_ms": inference_ms,
                 "loop_ms": loop_ms,
@@ -761,7 +854,8 @@ def main() -> int:
         raise RuntimeError("No frames were processed.")
     elapsed = time.perf_counter() - start
     summary = {
-        "source": str(source),
+        "source": source_display,
+        "live_source": is_live,
         "weights": weights_ref,
         "pedestrian_weights": pedestrian_weights_ref,
         "general_classes": general_classes,
@@ -770,6 +864,7 @@ def main() -> int:
         "precision": "fp16" if use_fp16 else "fp32",
         "video": {
             "width": width, "height": height, "fps": fps,
+            "capture_backend": args.camera_backend,
             "metadata_frames": total_frames,
             "metadata_duration_seconds": duration_seconds,
         },
