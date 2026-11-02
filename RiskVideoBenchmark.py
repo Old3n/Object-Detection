@@ -434,14 +434,83 @@ def main() -> int:
             capture.release()
             raise RuntimeError(f"Could not create output video: {output}")
 
-    print("[INFO] Risk dashboard: v2 (HUD rendered after preview resize)")
-    print(f"[INFO] Loading model: {weights_ref}")
+    print("[INFO] Risk dashboard: lane-aware multi-model")
+    print(f"[INFO] Loading general COCO model: {weights_ref}")
     model = YOLO(weights_ref)
+
+    pedestrian_weights_ref = None
+    pedestrian_model = None
+    if args.pedestrian_weights:
+        pedestrian_path = Path(args.pedestrian_weights).expanduser()
+        pedestrian_weights_ref = (
+            str(pedestrian_path.resolve())
+            if pedestrian_path.is_file()
+            else args.pedestrian_weights
+        )
+        print(f"[INFO] Loading pedestrian-attribute model: {pedestrian_weights_ref}")
+        pedestrian_model = YOLO(pedestrian_weights_ref)
+        expected_names = {
+            0: "child",
+            1: "woman",
+            2: "elderly_person",
+            3: "person_with_wheelchair",
+            4: "other_person",
+        }
+        actual_names = pedestrian_model.names
+        for class_id, expected_name in expected_names.items():
+            actual_name = (
+                actual_names.get(class_id, actual_names.get(str(class_id)))
+                if isinstance(actual_names, dict)
+                else actual_names[class_id] if class_id < len(actual_names) else None
+            )
+            if actual_name != expected_name:
+                raise ValueError(
+                    f"Pedestrian checkpoint class {class_id} must be "
+                    f"'{expected_name}', found '{actual_name}'. "
+                    "Train it with data/pedestrian_attributes.yaml."
+                )
+
+    if args.classes is not None:
+        general_classes = list(args.classes)
+    else:
+        general_classes = [2, 5, 7, 9] if pedestrian_model else [0, 2, 5, 7, 9]
+    if pedestrian_model is not None:
+        general_classes = [class_id for class_id in general_classes if class_id != 0]
+        if not general_classes:
+            raise ValueError(
+                "The general detector has no classes left. With --pedestrian-weights, "
+                "the custom model handles pedestrians; use COCO classes 2 5 7 9."
+            )
+
+    general_names = (
+        {int(key): str(value) for key, value in model.names.items()}
+        if isinstance(model.names, dict)
+        else {index: str(value) for index, value in enumerate(model.names)}
+    )
+    names = dict(general_names)
+    if pedestrian_model is not None:
+        attribute_names = (
+            {int(key): str(value) for key, value in pedestrian_model.names.items()}
+            if isinstance(pedestrian_model.names, dict)
+            else {index: str(value) for index, value in enumerate(pedestrian_model.names)}
+        )
+        names.update({100 + class_id: label for class_id, label in attribute_names.items()})
+
+    risk_pedestrian_ids = (
+        set(range(100, 105))
+        if pedestrian_model is not None
+        else set(args.pedestrian_class_ids)
+    )
     assessor = CollisionRiskAssessor(
-        pedestrian_class_ids=args.pedestrian_class_ids,
+        pedestrian_class_ids=risk_pedestrian_ids,
         vehicle_class_ids=args.vehicle_class_ids,
     )
-    names = model.names
+    lane_detector = LaneDetector()
+    print(f"[INFO] General COCO classes: {general_classes}")
+    if pedestrian_model is None:
+        print("[WARN] No --pedestrian-weights supplied: people are generic COCO 'person' detections.")
+    else:
+        print("[INFO] Custom pedestrian classes are mapped to internal IDs 100-104.")
     frame_rows: list[dict[str, Any]] = []
     inference_times: list[float] = []
     processing_times: list[float] = []
@@ -450,6 +519,8 @@ def main() -> int:
     detection_total = 0
     raw_detection_total = 0
     max_risk = CLEAR
+    lane_status_frames: Counter[str] = Counter()
+    lane_confidences: list[float] = []
     start = time.perf_counter()
 
     print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
@@ -470,7 +541,7 @@ def main() -> int:
 
             sync_cuda(device)
             inference_start = time.perf_counter()
-            result = model.track(
+            general_result = model.track(
                 frame,
                 persist=True,
                 tracker=args.tracker,
@@ -479,40 +550,82 @@ def main() -> int:
                 iou=args.iou,
                 device=device,
                 quantize=quantize,
-                classes=args.classes,
+                classes=general_classes,
                 verbose=False,
             )[0]
-            sync_cuda(device)
-            inference_ms = (time.perf_counter() - inference_start) * 1000.0
 
-            tracked_objects = []
+            tracked_objects: list[tuple[float, float, float, float, int, float, int]] = []
             raw_class_counts: Counter[str] = Counter()
             raw_detection_count = 0
-            boxes = result.boxes
-            if boxes is not None and len(boxes) > 0:
-                raw_class_ids = boxes.cls.int().cpu().tolist()
-                raw_detection_count = len(raw_class_ids)
+
+            def append_result_tracks(
+                result: Any,
+                *,
+                track_offset: int = 0,
+                class_offset: int = 0,
+            ) -> None:
+                nonlocal raw_detection_count
+                boxes = result.boxes
+                if boxes is None or len(boxes) == 0:
+                    return
+                class_ids = boxes.cls.int().cpu().tolist()
+                raw_detection_count += len(class_ids)
                 raw_class_counts.update(
-                    class_name(names, int(class_id)) for class_id in raw_class_ids
+                    class_name(names, int(class_id) + class_offset)
+                    for class_id in class_ids
                 )
-                if boxes.id is not None:
-                    coordinates = boxes.xyxy.cpu().tolist()
-                    track_ids = boxes.id.int().cpu().tolist()
-                    confidences = boxes.conf.float().cpu().tolist()
-                    tracked_class_ids = boxes.cls.int().cpu().tolist()
-                    tracked_objects = [
+                if boxes.id is None:
+                    return
+                coordinates = boxes.xyxy.cpu().tolist()
+                track_ids = boxes.id.int().cpu().tolist()
+                confidences = boxes.conf.float().cpu().tolist()
+                for box, track_id, confidence, class_id in zip(
+                    coordinates, track_ids, confidences, class_ids
+                ):
+                    tracked_objects.append(
                         (
                             box[0], box[1], box[2], box[3],
-                            int(track_id), float(confidence), int(class_id),
+                            int(track_id) + track_offset,
+                            float(confidence),
+                            int(class_id) + class_offset,
                         )
-                        for box, track_id, confidence, class_id in zip(
-                            coordinates, track_ids, confidences, tracked_class_ids
-                        )
-                    ]
+                    )
 
+            append_result_tracks(general_result)
+
+            if pedestrian_model is not None:
+                pedestrian_result = pedestrian_model.track(
+                    frame,
+                    persist=True,
+                    tracker=args.tracker,
+                    imgsz=args.imgsz,
+                    conf=args.conf,
+                    iou=args.iou,
+                    device=device,
+                    quantize=quantize,
+                    verbose=False,
+                )[0]
+                # Track and class ID namespaces prevent collisions with COCO IDs.
+                append_result_tracks(
+                    pedestrian_result,
+                    track_offset=1_000_000,
+                    class_offset=100,
+                )
+
+            sync_cuda(device)
+            inference_ms = (time.perf_counter() - inference_start) * 1000.0
+            lane_estimate = lane_detector.detect(frame)
+            lane_corridor = (
+                lane_estimate.corridor
+                if lane_estimate.status in {"DETECTED", "TRACKED"}
+                else None
+            )
             video_timestamp = frame_count / fps if fps > 0 else time.monotonic()
             report = assessor.update(
-                tracked_objects, frame.shape, timestamp=video_timestamp
+                tracked_objects,
+                frame.shape,
+                timestamp=video_timestamp,
+                ego_corridor=lane_corridor,
             )
             frame_count += 1
             loop_ms = (time.perf_counter() - frame_start) * 1000.0
@@ -526,13 +639,20 @@ def main() -> int:
                 "inference_ms": inference_ms,
                 "loop_ms": loop_ms,
                 "fps": current_fps,
-                "model": Path(weights_ref).name if Path(weights_ref).is_file() else weights_ref,
+                "model": (
+                    Path(weights_ref).name if Path(weights_ref).is_file() else weights_ref
+                ) + (
+                    f" + {Path(pedestrian_weights_ref).name}"
+                    if pedestrian_weights_ref else ""
+                ),
                 "tracker": args.tracker,
                 "device": device,
                 "precision": "FP16" if use_fp16 else "FP32",
                 "confidence": args.conf,
                 "raw_detections": raw_detection_count,
                 "class_counts": dict(raw_class_counts),
+                "lane_status": lane_estimate.status,
+                "lane_confidence": lane_estimate.confidence,
                 "ui_scale": args.ui_scale,
             }
             annotated = draw_report(
@@ -544,6 +664,8 @@ def main() -> int:
             raw_detection_total += raw_detection_count
             inference_times.append(inference_ms)
             risk_frames.update([report.level])
+            lane_status_frames.update([lane_estimate.status])
+            lane_confidences.append(lane_estimate.confidence)
             if RISK_RANK[report.level] > RISK_RANK[max_risk]:
                 max_risk = report.level
 
@@ -611,6 +733,8 @@ def main() -> int:
                     "raw_detections": raw_detection_count,
                     "tracked_objects": len(tracked_objects),
                     "class_counts": json.dumps(dict(raw_class_counts), ensure_ascii=False),
+                    "lane_status": lane_estimate.status,
+                    "lane_confidence": round(lane_estimate.confidence, 4),
                     "risk_level": report.level,
                     "risk_reason": report.reason,
                     "objects": json.dumps(object_rows, ensure_ascii=False),
@@ -639,6 +763,8 @@ def main() -> int:
     summary = {
         "source": str(source),
         "weights": weights_ref,
+        "pedestrian_weights": pedestrian_weights_ref,
+        "general_classes": general_classes,
         "tracker": args.tracker,
         "device": device,
         "precision": "fp16" if use_fp16 else "fp32",
@@ -660,6 +786,8 @@ def main() -> int:
         "average_processing_ms": statistics.fmean(processing_times),
         "end_to_end_fps": frame_count / elapsed if elapsed > 0 else 0.0,
         "risk_frames": dict(risk_frames),
+        "lane_status_frames": dict(lane_status_frames),
+        "average_lane_confidence": statistics.fmean(lane_confidences),
         "maximum_risk_observed": max_risk,
         "outputs": {
             "annotated_video": None if args.no_save_video else str(output),
@@ -677,6 +805,7 @@ def main() -> int:
         fields = [
             "frame", "timestamp_seconds", "inference_ms", "processing_ms",
             "raw_detections", "tracked_objects", "class_counts",
+            "lane_status", "lane_confidence",
             "risk_level", "risk_reason", "objects",
         ]
         writer_csv = csv.DictWriter(file, fieldnames=fields)
@@ -692,6 +821,7 @@ def main() -> int:
     print(f"Median / P95 inference:{summary['median_inference_ms']:.2f} / {summary['p95_inference_ms']:.2f} ms")
     print(f"End-to-end FPS:        {summary['end_to_end_fps']:.2f}")
     print(f"Risk frames:           {dict(risk_frames)}")
+    print(f"Lane status frames:    {dict(lane_status_frames)}")
     print(f"Maximum observed risk:{max_risk}")
     print(f"Annotated video:       {'disabled' if args.no_save_video else output}")
     print(f"CSV:                   {csv_path}")
