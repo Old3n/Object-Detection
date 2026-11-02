@@ -74,6 +74,8 @@ The estimator is covered by unit tests:
 python -m unittest discover -s tests -v
 ```
 
+GitHub Actions also compiles the Python sources and runs this suite on pushes and pull requests.
+
 ---
 
 ## Custom Pedestrian Attribute Detector
