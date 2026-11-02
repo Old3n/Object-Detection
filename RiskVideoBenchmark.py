@@ -18,6 +18,7 @@ import cv2
 import torch
 from ultralytics import YOLO
 
+from adas.lane_detection import LaneDetector
 from adas.risk_assessment import (
     CAUTION,
     CLEAR,
@@ -53,6 +54,36 @@ def sync_cuda(device: str) -> None:
         torch.cuda.synchronize(int(index)) if index.isdigit() else torch.cuda.synchronize()
 
 
+
+def resolve_source(value: str) -> tuple[bool, int | str, str, Path | None]:
+    """Resolve a local video path, USB camera index, or network stream URL."""
+    raw = value.strip()
+    if raw.isdigit():
+        index = int(raw)
+        return True, index, f"camera_{index}", None
+    if raw.lower().startswith(("rtsp://", "rtsps://", "http://", "https://")):
+        return True, raw, "network_camera", None
+    path = Path(raw).expanduser().resolve()
+    return False, str(path), path.stem, path
+
+
+def open_capture(
+    source: int | str,
+    backend_name: str,
+) -> cv2.VideoCapture:
+    """Open an OpenCV source using the selected capture backend."""
+    backend_map = {
+        "auto": cv2.CAP_ANY,
+        "dshow": cv2.CAP_DSHOW,
+        "msmf": cv2.CAP_MSMF,
+        "ffmpeg": cv2.CAP_FFMPEG,
+    }
+    backend = backend_map[backend_name]
+    if isinstance(source, int) and backend_name == "auto":
+        return cv2.VideoCapture(source)
+    return cv2.VideoCapture(source, backend)
+
+
 def _blend_panel(frame: Any, x1: int, y1: int, x2: int, y2: int, alpha: float = 0.82) -> None:
     """Draw a dark translucent panel without hiding all underlying footage."""
     overlay = frame.copy()
@@ -79,20 +110,23 @@ def draw_report(
     margin = max(10, round(16 * scale))
     thickness = max(1, round(2 * scale))
 
-    polygon = [
-        (round(x * width), round(y * height))
-        for x, y in report.corridor
-    ]
-    import numpy as np
+    lane_status = str(stats.get("lane_status", "NOT_DETECTED"))
+    if lane_status in {"DETECTED", "TRACKED"}:
+        polygon = [
+            (round(x * width), round(y * height))
+            for x, y in report.corridor
+        ]
+        import numpy as np
 
-    polygon_array = np.asarray(polygon, dtype="int32")
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [polygon_array], (255, 255, 0))
-    cv2.addWeighted(overlay, 0.055, frame, 0.945, 0, frame)
-    cv2.polylines(
-        frame, [polygon_array], isClosed=True, color=(0, 255, 255),
-        thickness=max(2, round(2 * scale)),
-    )
+        polygon_array = np.asarray(polygon, dtype="int32")
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [polygon_array], (255, 255, 0))
+        cv2.addWeighted(overlay, 0.055, frame, 0.945, 0, frame)
+        lane_color = (0, 220, 0) if lane_status == "DETECTED" else (0, 190, 255)
+        cv2.polylines(
+            frame, [polygon_array], isClosed=True, color=lane_color,
+            thickness=max(2, round(3 * scale)),
+        )
 
     risk_by_id = {item.track_id: item for item in report.objects}
     for x1, y1, x2, y2, track_id, confidence, class_id in tracked_objects:
@@ -113,7 +147,7 @@ def draw_report(
             (255, 255, 255), thickness, cv2.LINE_AA,
         )
 
-    header_h = round(145 * scale)
+    header_h = round(178 * scale)
     footer_h = round(82 * scale)
     panel_w = min(round(410 * scale), round(width * 0.43))
     panel_x = width - panel_w
@@ -141,22 +175,30 @@ def draw_report(
     precision = str(stats.get("precision", "FP32"))
     conf = float(stats.get("confidence", 0.25))
     raw_detection_count = int(stats.get("raw_detections", len(tracked_objects)))
+    lane_confidence = float(stats.get("lane_confidence", 0.0))
 
     title_y = round(30 * scale)
     detail_y = round(60 * scale)
     model_y = round(91 * scale)
     perf_y = round(122 * scale)
+    lane_y = round(153 * scale)
     title = f"ADAS PERCEPTION  |  COLLISION RISK: {report.level}"
     cv2.putText(
         frame, title, (margin, title_y), font, 0.90 * scale,
         risk_color, thickness + 1, cv2.LINE_AA,
     )
-    position = (
-        f"FRAME {frame_index:,}/{total_frames:,}  |  "
-        f"VIDEO {timestamp:05.1f}s / {duration:05.1f}s"
-        if total_frames > 0
-        else f"FRAME {frame_index:,}  |  VIDEO {timestamp:05.1f}s"
-    )
+    if stats.get("live"):
+        position = (
+            f"LIVE {stats.get('source_label', 'CAMERA')}  |  "
+            f"ELAPSED {timestamp:05.1f}s  |  FRAME {frame_index:,}"
+        )
+    else:
+        position = (
+            f"FRAME {frame_index:,}/{total_frames:,}  |  "
+            f"VIDEO {timestamp:05.1f}s / {duration:05.1f}s"
+            if total_frames > 0
+            else f"FRAME {frame_index:,}  |  VIDEO {timestamp:05.1f}s"
+        )
     cv2.putText(
         frame, position, (margin, detail_y), font, 0.60 * scale,
         (245, 245, 245), thickness, cv2.LINE_AA,
@@ -174,6 +216,18 @@ def draw_report(
     cv2.putText(
         frame, perf[:150], (margin, perf_y), font, 0.52 * scale,
         (235, 235, 235), max(1, thickness - 1), cv2.LINE_AA,
+    )
+    lane_text = (
+        f"LANE: {lane_status}  |  CONFIDENCE {lane_confidence:.2f}"
+        if lane_status in {"DETECTED", "TRACKED"}
+        else "LANE: NOT DETECTED  |  COLLISION CHECK USES FALLBACK IMAGE ROI"
+    )
+    lane_color = (0, 220, 0) if lane_status == "DETECTED" else (
+        (0, 190, 255) if lane_status == "TRACKED" else (0, 165, 255)
+    )
+    cv2.putText(
+        frame, lane_text[:150], (margin, lane_y), font, 0.53 * scale,
+        lane_color, max(1, thickness - 1), cv2.LINE_AA,
     )
 
     panel_y = header_h + round(8 * scale)
@@ -280,7 +334,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Benchmark YOLO tracking and collision-risk assessment on a video."
     )
-    parser.add_argument("--source", required=True, type=Path, help="Input video.")
+    parser.add_argument(
+        "--source", required=True, type=str,
+        help="Video path, USB camera index (0, 1, ...), or RTSP/HTTP camera URL.",
+    )
     parser.add_argument(
         "--weights",
         required=True,
@@ -295,7 +352,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--iou", type=float, default=0.7)
-    parser.add_argument("--classes", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--classes", type=int, nargs="+", default=None,
+        help="COCO classes for the general detector. Defaults to person, car, bus, truck and traffic light.",
+    )
+    parser.add_argument(
+        "--pedestrian-weights", default=None,
+        help="Optional custom checkpoint trained from JAAD pedestrian attributes.",
+    )
     parser.add_argument(
         "--pedestrian-class-ids",
         type=int,
@@ -307,10 +371,28 @@ def parse_args() -> argparse.Namespace:
         "--vehicle-class-ids",
         type=int,
         nargs="+",
-        default=[1, 2, 3, 5, 7],
+        default=[2, 5, 7],
         help="Class IDs treated as vehicles by the risk estimator.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument(
+        "--max-seconds", type=float, default=None,
+        help="Stop live camera/stream capture after this many seconds.",
+    )
+    parser.add_argument(
+        "--camera-backend", choices=("auto", "dshow", "msmf", "ffmpeg"),
+        default="auto", help="OpenCV capture backend (Windows: try dshow or msmf).",
+    )
+    parser.add_argument("--capture-width", type=int, default=0)
+    parser.add_argument("--capture-height", type=int, default=0)
+    parser.add_argument(
+        "--capture-fps", type=float, default=0.0,
+        help="Request a camera FPS; 0 leaves the camera default unchanged.",
+    )
+    parser.add_argument(
+        "--live-fps", type=float, default=30.0,
+        help="Fallback FPS for live sources that do not report their FPS.",
+    )
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--csv", dest="csv_path", type=Path, default=None)
     parser.add_argument("--json", dest="json_path", type=Path, default=None)
@@ -338,13 +420,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    source = args.source.expanduser().resolve()
+    is_live, capture_source, source_label, source_path = resolve_source(args.source)
+    source_display = source_label if is_live else str(source_path)
     weights_path = Path(args.weights).expanduser()
     weights_ref = str(weights_path.resolve()) if weights_path.is_file() else args.weights
-    if not source.is_file():
-        raise FileNotFoundError(f"Input video not found: {source}")
+    if not is_live and (source_path is None or not source_path.is_file()):
+        raise FileNotFoundError(f"Input video not found: {source_path}")
     if args.imgsz < 32 or args.max_frames is not None and args.max_frames < 1:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
+    if args.max_seconds is not None and args.max_seconds <= 0:
+        raise ValueError("--max-seconds must be positive.")
+    if args.capture_width < 0 or args.capture_height < 0 or args.capture_fps < 0 or args.live_fps <= 0:
+        raise ValueError("Capture width/height/FPS cannot be negative and --live-fps must be positive.")
     if args.display_width < 1 or args.display_height < 1:
         raise ValueError("--display-width and --display-height must be positive.")
     if args.max_display_objects < 1:
@@ -365,32 +452,54 @@ def main() -> int:
     if args.quantize == "fp16" and not wants_cuda:
         print("[WARN] FP16 requested without CUDA; using FP32.")
 
+    live_stamp = time.strftime("%Y%m%d_%H%M%S")
+    if is_live:
+        default_stem = Path("runs/live_camera") / f"{source_label}_{live_stamp}_risk"
+    else:
+        default_stem = source_path.with_name(f"{source_path.stem}_risk")
     output = (
         args.output.expanduser().resolve()
         if args.output
-        else source.with_name(f"{source.stem}_risk.mp4")
+        else default_stem.with_suffix(".mp4").resolve()
     )
     csv_path = (
         args.csv_path.expanduser().resolve()
         if args.csv_path
-        else source.with_name(f"{source.stem}_risk.csv")
+        else default_stem.with_suffix(".csv").resolve()
     )
     json_path = (
         args.json_path.expanduser().resolve()
         if args.json_path
-        else source.with_name(f"{source.stem}_risk.json")
+        else default_stem.with_suffix(".json").resolve()
     )
-    if output == source:
+    if not is_live and output == source_path:
         raise ValueError("Output video cannot overwrite the input video.")
     for path in (output, csv_path, json_path):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    capture = cv2.VideoCapture(str(source))
+    capture = open_capture(capture_source, args.camera_backend)
     if not capture.isOpened():
-        raise RuntimeError(f"OpenCV could not open video: {source}")
+        raise RuntimeError(
+            f"OpenCV could not open source '{source_display}'. "
+            "For USB cameras try --camera-backend dshow or msmf; "
+            "for IP cameras check the RTSP/HTTP URL and stream credentials."
+        )
+    if args.capture_width > 0:
+        capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.capture_width)
+    if args.capture_height > 0:
+        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.capture_height)
+    if args.capture_fps > 0:
+        capture.set(cv2.CAP_PROP_FPS, args.capture_fps)
+    if is_live:
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
     fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    if is_live and fps <= 0:
+        fps = args.capture_fps or args.live_fps
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration_seconds = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
+    duration_seconds = total_frames / fps if fps > 0 and total_frames > 0 else (
+        args.max_seconds or 0.0
+    )
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     if width <= 0 or height <= 0:
@@ -409,14 +518,83 @@ def main() -> int:
             capture.release()
             raise RuntimeError(f"Could not create output video: {output}")
 
-    print("[INFO] Risk dashboard: v2 (HUD rendered after preview resize)")
-    print(f"[INFO] Loading model: {weights_ref}")
+    print("[INFO] Risk dashboard: lane-aware multi-model")
+    print(f"[INFO] Loading general COCO model: {weights_ref}")
     model = YOLO(weights_ref)
+
+    pedestrian_weights_ref = None
+    pedestrian_model = None
+    if args.pedestrian_weights:
+        pedestrian_path = Path(args.pedestrian_weights).expanduser()
+        pedestrian_weights_ref = (
+            str(pedestrian_path.resolve())
+            if pedestrian_path.is_file()
+            else args.pedestrian_weights
+        )
+        print(f"[INFO] Loading pedestrian-attribute model: {pedestrian_weights_ref}")
+        pedestrian_model = YOLO(pedestrian_weights_ref)
+        expected_names = {
+            0: "child",
+            1: "woman",
+            2: "elderly_person",
+            3: "person_with_wheelchair",
+            4: "other_person",
+        }
+        actual_names = pedestrian_model.names
+        for class_id, expected_name in expected_names.items():
+            actual_name = (
+                actual_names.get(class_id, actual_names.get(str(class_id)))
+                if isinstance(actual_names, dict)
+                else actual_names[class_id] if class_id < len(actual_names) else None
+            )
+            if actual_name != expected_name:
+                raise ValueError(
+                    f"Pedestrian checkpoint class {class_id} must be "
+                    f"'{expected_name}', found '{actual_name}'. "
+                    "Train it with data/pedestrian_attributes.yaml."
+                )
+
+    if args.classes is not None:
+        general_classes = list(args.classes)
+    else:
+        general_classes = [2, 5, 7, 9] if pedestrian_model else [0, 2, 5, 7, 9]
+    if pedestrian_model is not None:
+        general_classes = [class_id for class_id in general_classes if class_id != 0]
+        if not general_classes:
+            raise ValueError(
+                "The general detector has no classes left. With --pedestrian-weights, "
+                "the custom model handles pedestrians; use COCO classes 2 5 7 9."
+            )
+
+    general_names = (
+        {int(key): str(value) for key, value in model.names.items()}
+        if isinstance(model.names, dict)
+        else {index: str(value) for index, value in enumerate(model.names)}
+    )
+    names = dict(general_names)
+    if pedestrian_model is not None:
+        attribute_names = (
+            {int(key): str(value) for key, value in pedestrian_model.names.items()}
+            if isinstance(pedestrian_model.names, dict)
+            else {index: str(value) for index, value in enumerate(pedestrian_model.names)}
+        )
+        names.update({100 + class_id: label for class_id, label in attribute_names.items()})
+
+    risk_pedestrian_ids = (
+        set(range(100, 105))
+        if pedestrian_model is not None
+        else set(args.pedestrian_class_ids)
+    )
     assessor = CollisionRiskAssessor(
-        pedestrian_class_ids=args.pedestrian_class_ids,
+        pedestrian_class_ids=risk_pedestrian_ids,
         vehicle_class_ids=args.vehicle_class_ids,
     )
-    names = model.names
+    lane_detector = LaneDetector()
+    print(f"[INFO] General COCO classes: {general_classes}")
+    if pedestrian_model is None:
+        print("[WARN] No --pedestrian-weights supplied: people are generic COCO 'person' detections.")
+    else:
+        print("[INFO] Custom pedestrian classes are mapped to internal IDs 100-104.")
     frame_rows: list[dict[str, Any]] = []
     inference_times: list[float] = []
     processing_times: list[float] = []
@@ -425,9 +603,14 @@ def main() -> int:
     detection_total = 0
     raw_detection_total = 0
     max_risk = CLEAR
+    lane_status_frames: Counter[str] = Counter()
+    lane_confidences: list[float] = []
     start = time.perf_counter()
+    live_start = start
 
-    print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
+    source_mode = "LIVE" if is_live else "FILE"
+    print(f"[INFO] Source: {source_display} ({source_mode})")
+    print(f"[INFO] Capture: {width}x{height} @ {fps:.3f} FPS")
     print(f"[INFO] Model: {weights_ref}")
     print(f"[INFO] Device: {device}, precision: {'FP16' if use_fp16 else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
@@ -437,7 +620,14 @@ def main() -> int:
         cv2.namedWindow(window_title, cv2.WINDOW_AUTOSIZE)
 
     try:
-        while args.max_frames is None or frame_count < args.max_frames:
+        while (
+            (args.max_frames is None or frame_count < args.max_frames)
+            and (
+                args.max_seconds is None
+                or not is_live
+                or time.perf_counter() - live_start < args.max_seconds
+            )
+        ):
             frame_start = time.perf_counter()
             ok, frame = capture.read()
             if not ok:
@@ -445,7 +635,7 @@ def main() -> int:
 
             sync_cuda(device)
             inference_start = time.perf_counter()
-            result = model.track(
+            general_result = model.track(
                 frame,
                 persist=True,
                 tracker=args.tracker,
@@ -454,40 +644,86 @@ def main() -> int:
                 iou=args.iou,
                 device=device,
                 quantize=quantize,
-                classes=args.classes,
+                classes=general_classes,
                 verbose=False,
             )[0]
-            sync_cuda(device)
-            inference_ms = (time.perf_counter() - inference_start) * 1000.0
 
-            tracked_objects = []
+            tracked_objects: list[tuple[float, float, float, float, int, float, int]] = []
             raw_class_counts: Counter[str] = Counter()
             raw_detection_count = 0
-            boxes = result.boxes
-            if boxes is not None and len(boxes) > 0:
-                raw_class_ids = boxes.cls.int().cpu().tolist()
-                raw_detection_count = len(raw_class_ids)
+
+            def append_result_tracks(
+                result: Any,
+                *,
+                track_offset: int = 0,
+                class_offset: int = 0,
+            ) -> None:
+                nonlocal raw_detection_count
+                boxes = result.boxes
+                if boxes is None or len(boxes) == 0:
+                    return
+                class_ids = boxes.cls.int().cpu().tolist()
+                raw_detection_count += len(class_ids)
                 raw_class_counts.update(
-                    class_name(names, int(class_id)) for class_id in raw_class_ids
+                    class_name(names, int(class_id) + class_offset)
+                    for class_id in class_ids
                 )
-                if boxes.id is not None:
-                    coordinates = boxes.xyxy.cpu().tolist()
-                    track_ids = boxes.id.int().cpu().tolist()
-                    confidences = boxes.conf.float().cpu().tolist()
-                    tracked_class_ids = boxes.cls.int().cpu().tolist()
-                    tracked_objects = [
+                if boxes.id is None:
+                    return
+                coordinates = boxes.xyxy.cpu().tolist()
+                track_ids = boxes.id.int().cpu().tolist()
+                confidences = boxes.conf.float().cpu().tolist()
+                for box, track_id, confidence, class_id in zip(
+                    coordinates, track_ids, confidences, class_ids
+                ):
+                    tracked_objects.append(
                         (
                             box[0], box[1], box[2], box[3],
-                            int(track_id), float(confidence), int(class_id),
+                            int(track_id) + track_offset,
+                            float(confidence),
+                            int(class_id) + class_offset,
                         )
-                        for box, track_id, confidence, class_id in zip(
-                            coordinates, track_ids, confidences, tracked_class_ids
-                        )
-                    ]
+                    )
 
-            video_timestamp = frame_count / fps if fps > 0 else time.monotonic()
+            append_result_tracks(general_result)
+
+            if pedestrian_model is not None:
+                pedestrian_result = pedestrian_model.track(
+                    frame,
+                    persist=True,
+                    tracker=args.tracker,
+                    imgsz=args.imgsz,
+                    conf=args.conf,
+                    iou=args.iou,
+                    device=device,
+                    quantize=quantize,
+                    verbose=False,
+                )[0]
+                # Track and class ID namespaces prevent collisions with COCO IDs.
+                append_result_tracks(
+                    pedestrian_result,
+                    track_offset=1_000_000,
+                    class_offset=100,
+                )
+
+            sync_cuda(device)
+            inference_ms = (time.perf_counter() - inference_start) * 1000.0
+            lane_estimate = lane_detector.detect(frame)
+            lane_corridor = (
+                lane_estimate.corridor
+                if lane_estimate.status in {"DETECTED", "TRACKED"}
+                else None
+            )
+            video_timestamp = (
+                time.perf_counter() - live_start
+                if is_live
+                else (frame_count / fps if fps > 0 else time.monotonic())
+            )
             report = assessor.update(
-                tracked_objects, frame.shape, timestamp=video_timestamp
+                tracked_objects,
+                frame.shape,
+                timestamp=video_timestamp,
+                ego_corridor=lane_corridor,
             )
             frame_count += 1
             loop_ms = (time.perf_counter() - frame_start) * 1000.0
@@ -497,17 +733,26 @@ def main() -> int:
                 "frame": frame_count,
                 "total_frames": total_frames,
                 "video_seconds": video_timestamp,
+                "live": is_live,
+                "source_label": source_label,
                 "duration_seconds": duration_seconds,
                 "inference_ms": inference_ms,
                 "loop_ms": loop_ms,
                 "fps": current_fps,
-                "model": Path(weights_ref).name if Path(weights_ref).is_file() else weights_ref,
+                "model": (
+                    Path(weights_ref).name if Path(weights_ref).is_file() else weights_ref
+                ) + (
+                    f" + {Path(pedestrian_weights_ref).name}"
+                    if pedestrian_weights_ref else ""
+                ),
                 "tracker": args.tracker,
                 "device": device,
                 "precision": "FP16" if use_fp16 else "FP32",
                 "confidence": args.conf,
                 "raw_detections": raw_detection_count,
                 "class_counts": dict(raw_class_counts),
+                "lane_status": lane_estimate.status,
+                "lane_confidence": lane_estimate.confidence,
                 "ui_scale": args.ui_scale,
             }
             annotated = draw_report(
@@ -519,6 +764,8 @@ def main() -> int:
             raw_detection_total += raw_detection_count
             inference_times.append(inference_ms)
             risk_frames.update([report.level])
+            lane_status_frames.update([lane_estimate.status])
+            lane_confidences.append(lane_estimate.confidence)
             if RISK_RANK[report.level] > RISK_RANK[max_risk]:
                 max_risk = report.level
 
@@ -586,6 +833,8 @@ def main() -> int:
                     "raw_detections": raw_detection_count,
                     "tracked_objects": len(tracked_objects),
                     "class_counts": json.dumps(dict(raw_class_counts), ensure_ascii=False),
+                    "lane_status": lane_estimate.status,
+                    "lane_confidence": round(lane_estimate.confidence, 4),
                     "risk_level": report.level,
                     "risk_reason": report.reason,
                     "objects": json.dumps(object_rows, ensure_ascii=False),
@@ -612,13 +861,17 @@ def main() -> int:
         raise RuntimeError("No frames were processed.")
     elapsed = time.perf_counter() - start
     summary = {
-        "source": str(source),
+        "source": source_display,
+        "live_source": is_live,
         "weights": weights_ref,
+        "pedestrian_weights": pedestrian_weights_ref,
+        "general_classes": general_classes,
         "tracker": args.tracker,
         "device": device,
         "precision": "fp16" if use_fp16 else "fp32",
         "video": {
             "width": width, "height": height, "fps": fps,
+            "capture_backend": args.camera_backend,
             "metadata_frames": total_frames,
             "metadata_duration_seconds": duration_seconds,
         },
@@ -635,6 +888,8 @@ def main() -> int:
         "average_processing_ms": statistics.fmean(processing_times),
         "end_to_end_fps": frame_count / elapsed if elapsed > 0 else 0.0,
         "risk_frames": dict(risk_frames),
+        "lane_status_frames": dict(lane_status_frames),
+        "average_lane_confidence": statistics.fmean(lane_confidences),
         "maximum_risk_observed": max_risk,
         "outputs": {
             "annotated_video": None if args.no_save_video else str(output),
@@ -652,6 +907,7 @@ def main() -> int:
         fields = [
             "frame", "timestamp_seconds", "inference_ms", "processing_ms",
             "raw_detections", "tracked_objects", "class_counts",
+            "lane_status", "lane_confidence",
             "risk_level", "risk_reason", "objects",
         ]
         writer_csv = csv.DictWriter(file, fieldnames=fields)
@@ -667,6 +923,7 @@ def main() -> int:
     print(f"Median / P95 inference:{summary['median_inference_ms']:.2f} / {summary['p95_inference_ms']:.2f} ms")
     print(f"End-to-end FPS:        {summary['end_to_end_fps']:.2f}")
     print(f"Risk frames:           {dict(risk_frames)}")
+    print(f"Lane status frames:    {dict(lane_status_frames)}")
     print(f"Maximum observed risk:{max_risk}")
     print(f"Annotated video:       {'disabled' if args.no_save_video else output}")
     print(f"CSV:                   {csv_path}")
