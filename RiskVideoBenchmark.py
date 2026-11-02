@@ -116,7 +116,11 @@ def parse_args() -> argparse.Namespace:
         description="Benchmark YOLO tracking and collision-risk assessment on a video."
     )
     parser.add_argument("--source", required=True, type=Path, help="Input video.")
-    parser.add_argument("--weights", required=True, help="YOLO checkpoint (.pt).")
+    parser.add_argument(
+        "--weights",
+        required=True,
+        help="Local checkpoint path or Ultralytics model name such as yolo26n.pt.",
+    )
     parser.add_argument(
         "--tracker",
         default="bytetrack.yaml",
@@ -147,6 +151,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", dest="json_path", type=Path, default=None)
     parser.add_argument("--no-save-video", action="store_true")
     parser.add_argument("--show", action="store_true")
+    parser.add_argument(
+        "--display-width", type=int, default=1280,
+        help="Maximum preview-window width in pixels (default: 1280).",
+    )
+    parser.add_argument(
+        "--display-height", type=int, default=720,
+        help="Maximum preview-window height in pixels (default: 720).",
+    )
     parser.add_argument("--half", action="store_true")
     return parser.parse_args()
 
@@ -154,13 +166,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     source = args.source.expanduser().resolve()
-    weights = Path(args.weights).expanduser().resolve()
+    weights_path = Path(args.weights).expanduser()
+    weights_ref = str(weights_path.resolve()) if weights_path.is_file() else args.weights
     if not source.is_file():
         raise FileNotFoundError(f"Input video not found: {source}")
-    if not weights.is_file():
-        raise FileNotFoundError(f"Model weights not found: {weights}")
     if args.imgsz < 32 or args.max_frames is not None and args.max_frames < 1:
         raise ValueError("--imgsz must be >=32 and --max-frames must be positive.")
+    if args.display_width < 1 or args.display_height < 1:
+        raise ValueError("--display-width and --display-height must be positive.")
     if not 0.0 < args.conf <= 1.0 or not 0.0 < args.iou <= 1.0:
         raise ValueError("--conf and --iou must be in (0,1].")
 
@@ -214,7 +227,8 @@ def main() -> int:
             capture.release()
             raise RuntimeError(f"Could not create output video: {output}")
 
-    model = YOLO(str(weights))
+    print(f"[INFO] Loading model: {weights_ref}")
+    model = YOLO(weights_ref)
     assessor = CollisionRiskAssessor(
         pedestrian_class_ids=args.pedestrian_class_ids,
         vehicle_class_ids=args.vehicle_class_ids,
@@ -230,9 +244,13 @@ def main() -> int:
     start = time.perf_counter()
 
     print(f"[INFO] Video: {width}x{height} @ {fps:.3f} FPS")
-    print(f"[INFO] Model: {weights}")
+    print(f"[INFO] Model: {weights_ref}")
     print(f"[INFO] Device: {device}, precision: {'FP16' if half else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
+
+    window_title = "YOLO tracking + collision-risk assessment (Q/Esc to stop)"
+    if args.show:
+        cv2.namedWindow(window_title, cv2.WINDOW_AUTOSIZE)
 
     try:
         while args.max_frames is None or frame_count < args.max_frames:
@@ -290,7 +308,21 @@ def main() -> int:
             if writer is not None:
                 writer.write(annotated)
             if args.show:
-                cv2.imshow("YOLO tracking + collision-risk assessment (Q/Esc to stop)", annotated)
+                frame_height, frame_width = annotated.shape[:2]
+                scale = min(
+                    1.0,
+                    args.display_width / frame_width,
+                    args.display_height / frame_height,
+                )
+                if scale < 1.0:
+                    preview = cv2.resize(
+                        annotated,
+                        (max(1, round(frame_width * scale)), max(1, round(frame_height * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+                else:
+                    preview = annotated
+                cv2.imshow(window_title, preview)
                 if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
                     break
 
@@ -343,7 +375,7 @@ def main() -> int:
     elapsed = time.perf_counter() - start
     summary = {
         "source": str(source),
-        "weights": str(weights),
+        "weights": weights_ref,
         "tracker": args.tracker,
         "device": device,
         "precision": "fp16" if half else "fp32",
