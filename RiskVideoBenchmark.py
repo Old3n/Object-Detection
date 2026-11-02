@@ -18,6 +18,7 @@ import cv2
 import torch
 from ultralytics import YOLO
 
+from adas.lane_detection import LaneDetector
 from adas.risk_assessment import (
     CAUTION,
     CLEAR,
@@ -79,20 +80,23 @@ def draw_report(
     margin = max(10, round(16 * scale))
     thickness = max(1, round(2 * scale))
 
-    polygon = [
-        (round(x * width), round(y * height))
-        for x, y in report.corridor
-    ]
-    import numpy as np
+    lane_status = str(stats.get("lane_status", "NOT_DETECTED"))
+    if lane_status in {"DETECTED", "TRACKED"}:
+        polygon = [
+            (round(x * width), round(y * height))
+            for x, y in report.corridor
+        ]
+        import numpy as np
 
-    polygon_array = np.asarray(polygon, dtype="int32")
-    overlay = frame.copy()
-    cv2.fillPoly(overlay, [polygon_array], (255, 255, 0))
-    cv2.addWeighted(overlay, 0.055, frame, 0.945, 0, frame)
-    cv2.polylines(
-        frame, [polygon_array], isClosed=True, color=(0, 255, 255),
-        thickness=max(2, round(2 * scale)),
-    )
+        polygon_array = np.asarray(polygon, dtype="int32")
+        overlay = frame.copy()
+        cv2.fillPoly(overlay, [polygon_array], (255, 255, 0))
+        cv2.addWeighted(overlay, 0.055, frame, 0.945, 0, frame)
+        lane_color = (0, 220, 0) if lane_status == "DETECTED" else (0, 190, 255)
+        cv2.polylines(
+            frame, [polygon_array], isClosed=True, color=lane_color,
+            thickness=max(2, round(3 * scale)),
+        )
 
     risk_by_id = {item.track_id: item for item in report.objects}
     for x1, y1, x2, y2, track_id, confidence, class_id in tracked_objects:
@@ -113,7 +117,7 @@ def draw_report(
             (255, 255, 255), thickness, cv2.LINE_AA,
         )
 
-    header_h = round(145 * scale)
+    header_h = round(178 * scale)
     footer_h = round(82 * scale)
     panel_w = min(round(410 * scale), round(width * 0.43))
     panel_x = width - panel_w
@@ -141,11 +145,13 @@ def draw_report(
     precision = str(stats.get("precision", "FP32"))
     conf = float(stats.get("confidence", 0.25))
     raw_detection_count = int(stats.get("raw_detections", len(tracked_objects)))
+    lane_confidence = float(stats.get("lane_confidence", 0.0))
 
     title_y = round(30 * scale)
     detail_y = round(60 * scale)
     model_y = round(91 * scale)
     perf_y = round(122 * scale)
+    lane_y = round(153 * scale)
     title = f"ADAS PERCEPTION  |  COLLISION RISK: {report.level}"
     cv2.putText(
         frame, title, (margin, title_y), font, 0.90 * scale,
@@ -174,6 +180,18 @@ def draw_report(
     cv2.putText(
         frame, perf[:150], (margin, perf_y), font, 0.52 * scale,
         (235, 235, 235), max(1, thickness - 1), cv2.LINE_AA,
+    )
+    lane_text = (
+        f"LANE: {lane_status}  |  CONFIDENCE {lane_confidence:.2f}"
+        if lane_status in {"DETECTED", "TRACKED"}
+        else "LANE: NOT DETECTED  |  COLLISION CHECK USES FALLBACK IMAGE ROI"
+    )
+    lane_color = (0, 220, 0) if lane_status == "DETECTED" else (
+        (0, 190, 255) if lane_status == "TRACKED" else (0, 165, 255)
+    )
+    cv2.putText(
+        frame, lane_text[:150], (margin, lane_y), font, 0.53 * scale,
+        lane_color, max(1, thickness - 1), cv2.LINE_AA,
     )
 
     panel_y = header_h + round(8 * scale)
@@ -295,7 +313,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--conf", type=float, default=0.25)
     parser.add_argument("--iou", type=float, default=0.7)
-    parser.add_argument("--classes", type=int, nargs="+", default=None)
+    parser.add_argument(
+        "--classes", type=int, nargs="+", default=None,
+        help="COCO classes for the general detector. Defaults to person, car, bus, truck and traffic light.",
+    )
+    parser.add_argument(
+        "--pedestrian-weights", default=None,
+        help="Optional custom checkpoint trained from JAAD pedestrian attributes.",
+    )
     parser.add_argument(
         "--pedestrian-class-ids",
         type=int,
@@ -307,7 +332,7 @@ def parse_args() -> argparse.Namespace:
         "--vehicle-class-ids",
         type=int,
         nargs="+",
-        default=[1, 2, 3, 5, 7],
+        default=[2, 5, 7],
         help="Class IDs treated as vehicles by the risk estimator.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
