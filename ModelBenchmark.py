@@ -135,7 +135,7 @@ class BrakingDecisionController:
             hist = self.track_history[tid]
 
             is_pedestrian = cls_id in pedestrian_classes
-            is_vehicle = cls_id in self.VEHICLE_CLASSES
+            is_vehicle = cls_id in self.VEHICLE_CLASSES and not is_pedestrian
             is_sign = cls_id in self.SIGN_CLASSES
             in_lane = self.in_ego_lane(bottom_center_x, bottom_y)
 
@@ -389,6 +389,7 @@ class LiveMonitorBenchmark:
                 break
             elif key in [ord("1"), ord("2"), ord("3")]:
                 self.active_slot = int(chr(key))
+                self.pedestrian_mode = False
                 self.reset_current_metrics()
             elif key == ord("w"):
                 self.pedestrian_mode = False
