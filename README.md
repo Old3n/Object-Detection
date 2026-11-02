@@ -155,6 +155,16 @@ runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
 
 Use your actual run directory if you changed `--project` or `--name`. This repository does not include the labelled training dataset or a trained custom checkpoint; detection of these new classes becomes available after you supply data and fine-tune the model.
 
+## Live monitor integration
+
+The existing webcam monitor can load the custom checkpoint without confusing its class IDs with COCO classes:
+
+```bash
+python ModelBenchmark.py --pedestrian-weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
+```
+
+Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the ADAS overlay while in that mode. All five custom person classes are passed to the pedestrian braking rules; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
+
 ## Fixed-video inference and benchmark
 
 `VideoBenchmark.py` runs a trained YOLO checkpoint on a local video file. It saves an annotated MP4, a per-frame CSV, and a summary JSON by default.
