@@ -5,7 +5,7 @@ Real-time multi-model object detection and tracking benchmark with an advisory, 
 ## Dependencies
 
 ```bash
-pip install -U ultralytics boxmot opencv-python lapx
+pip install -U ultralytics boxmot opencv-python lapx pyyaml
 ```
 
 ### PyTorch GPU Setup (CUDA 12.6)
@@ -159,6 +159,24 @@ python ModelBenchmark.py --pedestrian-weights runs/pedestrian/yolo26n-pedestrian
 ```
 
 Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the collision-risk overlay while in that mode. All five custom person classes are passed to the pedestrian risk estimator; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
+
+## Labelled-dataset accuracy evaluation
+
+Use `EvaluateModel.py` to validate a checkpoint against ground-truth annotations. This reports precision, recall, F1 and mAP metrics overall and per class, plus the lowest-F1 validation images.
+
+Run on the validation split:
+
+```bash
+python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
+```
+
+Run the final evaluation on a held-out test split:
+
+```bash
+python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt --split test
+```
+
+Useful options include `--imgsz`, `--batch`, `--device`, `--conf`, `--iou`, `--top-images`, and `--output`. The default JSON report is written under `runs/evaluation/`. Keep the test split untouched until model selection and tuning are complete.
 
 ## Fixed-video inference and benchmark
 
