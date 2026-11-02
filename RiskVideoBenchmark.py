@@ -601,8 +601,10 @@ def main() -> int:
             "metadata_duration_seconds": duration_seconds,
         },
         "frames": frame_count,
+        "raw_detections": raw_detection_total,
         "tracked_detections": detection_total,
-        "average_detections_per_frame": detection_total / frame_count,
+        "average_raw_detections_per_frame": raw_detection_total / frame_count,
+        "average_tracked_objects_per_frame": detection_total / frame_count,
         "average_inference_ms": statistics.fmean(inference_times),
         "median_inference_ms": statistics.median(inference_times),
         "p95_inference_ms": sorted(inference_times)[
