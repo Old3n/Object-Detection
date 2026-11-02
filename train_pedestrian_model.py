@@ -58,7 +58,7 @@ def validate_dataset_config(data_yaml: Path) -> None:
         else data_yaml.parent
     )
     if not dataset_root.is_absolute():
-        dataset_root = (Path.cwd() / dataset_root).resolve()
+        dataset_root = (data_yaml.parent / dataset_root).resolve()
 
     for split in ("train", "val"):
         split_value = config.get(split)
