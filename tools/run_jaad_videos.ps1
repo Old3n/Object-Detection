@@ -47,7 +47,7 @@ Write-Host "Results will be saved to $outputRoot"
 foreach ($video in $videos) {
     $index++
     $stem = $video.BaseName
-    $outputBase = Join-Path $outputRoot "\${stem}_risk"
+    $outputBase = Join-Path $outputRoot "${stem}_risk"
 
     Write-Host ""
     Write-Host "[$index/$total] $($video.Name)" -ForegroundColor Cyan
