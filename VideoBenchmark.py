@@ -88,9 +88,8 @@ def parse_args() -> argparse.Namespace:
         help="Do not write the annotated output video.",
     )
     parser.add_argument(
-        "--half",
-        action="store_true",
-        help="Use FP16 inference (CUDA only).",
+        "--quantize", choices=("fp32", "fp16"), default="fp32",
+        help="Inference precision: fp32 (default) or fp16 (CUDA only).",
     )
     return parser.parse_args()
 
@@ -168,9 +167,10 @@ def main() -> int:
             "Install a CUDA-enabled PyTorch build or use --device cpu."
         )
 
-    use_half = bool(args.half and is_cuda_device(device))
-    if args.half and not use_half:
-        print("[WARN] --half requested without CUDA; using FP32 on CPU.")
+    use_fp16 = args.quantize == "fp16" and is_cuda_device(device)
+    if args.quantize == "fp16" and not use_fp16:
+        print("[WARN] FP16 requested without CUDA; using FP32 on CPU.")
+    quantize = 16 if use_fp16 else 32
 
     output = (
         args.output.expanduser().resolve()
@@ -197,7 +197,7 @@ def main() -> int:
     print(f"[INFO] Loading weights: {weights}")
     model = YOLO(str(weights))
     names = model.names
-    print(f"[INFO] Device: {device}" + (", FP16" if use_half else ", FP32"))
+    print(f"[INFO] Device: {device}" + (", FP16" if use_fp16 else ", FP32"))
     print(f"[INFO] Classes: {names}")
 
     cap = cv2.VideoCapture(str(source))
@@ -260,7 +260,7 @@ def main() -> int:
                     conf=args.conf,
                     iou=args.iou,
                     device=device,
-                    half=use_half,
+                    quantize=quantize,
                     classes=args.classes,
                     verbose=False,
                 )[0]
@@ -281,7 +281,7 @@ def main() -> int:
                 conf=args.conf,
                 iou=args.iou,
                 device=device,
-                half=use_half,
+                quantize=quantize,
                 classes=args.classes,
                 verbose=False,
             )[0]
@@ -371,7 +371,7 @@ def main() -> int:
         "source": str(source),
         "weights": str(weights),
         "device": device,
-        "precision": "fp16" if use_half else "fp32",
+        "precision": "fp16" if use_fp16 else "fp32",
         "image_size": args.imgsz,
         "confidence_threshold": args.conf,
         "iou_threshold": args.iou,
@@ -436,7 +436,7 @@ def main() -> int:
 
     print("\n\n========== VIDEO BENCHMARK ==========")
     print(f"Model:                    {weights.name}")
-    print(f"Device / precision:       {device} / {'FP16' if use_half else 'FP32'}")
+    print(f"Device / precision:       {device} / {'FP16' if use_fp16 else 'FP32'}")
     print(f"Frames measured:          {measured_frames}")
     print(f"Total detections:         {total_detections}")
     print(f"Average inference:        {average_inference:.2f} ms")
