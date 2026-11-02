@@ -1,11 +1,11 @@
-﻿# AutoPilot - Live Object Tracking Benchmark + ADAS Braking
+﻿# AutoPilot - Object Detection, Tracking & ADAS Risk Estimation
 
-Real-time multi-model object tracking benchmark with live HUD comparison and a Level 1 ADAS braking decision module. Switch between YOLO26 variants (nano/small/medium) paired with ByteTrack, OC-SORT, and BoT-SORT trackers using hotkeys - all running on GPU with FP16 inference.
+Real-time multi-model object detection and tracking benchmark with an advisory, track-based collision-risk estimator. Compare YOLO26 variants paired with ByteTrack, OC-SORT, and BoT-SORT.
 
 ## Dependencies
 
 ```bash
-pip install -U ultralytics boxmot opencv-python lapx
+pip install -U ultralytics boxmot opencv-python lapx pyyaml
 ```
 
 ### PyTorch GPU Setup (CUDA 12.6)
@@ -39,45 +39,42 @@ python ModelBenchmark.py
 | `3` | Switch to M3: YOLO26m + BoT-SORT |
 | `W` | Webcam Desk Mode (person, bottle, cup, phone) |
 | `S` | Street Mode (person, bicycle, car, motorcycle, bus, truck, traffic light, stop sign) |
-| `B` | Toggle ADAS Braking Decision Module |
+| `B` | Toggle collision-risk assessment overlay (Street / Pedestrian mode) |
 | `R` | Reset metrics |
 | `Q` | Quit |
 
-## ADAS Braking Decision Module
+## Collision Risk Assessment
 
-Toggle with `S` (Street Mode) then `B` to enable. The module evaluates tracked objects and issues braking commands using three independent threat detectors:
+Press `B` in Street Mode or Pedestrian Attribute Mode to enable the visual risk overlay. The estimator consumes tracked detections and provides four advisory levels:
 
-### Threat Detection Rules
+| Level | Meaning |
+|---|---|
+| `CLEAR` | No elevated risk estimated from the currently tracked objects |
+| `CAUTION` | Approximate TTC is 3–5 seconds, or a track is predicted to enter the ego corridor |
+| `HIGH` | Approximate TTC is 1.5–3 seconds |
+| `CRITICAL` | Approximate TTC is 1.5 seconds or less |
 
-| Rule | Trigger | Command |
-|------|---------|---------|
-| **Proximity Brake** | Object bounding box fills >35% (pedestrian) or >45% (vehicle) of frame height while inside the ego-lane | `EMERGENCY BRAKE!` |
-| **TTC Brake** | Bounding box growth rate yields Time-To-Collision < 2.0 seconds | `BRAKE - LOW TTC!` |
-| **Cut-In Brake** | Object's lateral velocity predicts it will enter the ego-lane within 0.8 seconds | `BRAKE - CUT-IN!` |
-| **Sign Detection** | Stop sign or traffic light detected in frame | `SLOW - SIGN AHEAD` |
-| **Caution** | Object approaching but not yet at emergency threshold (>21% pedestrian / >27% vehicle) | `CAUTION - CLOSING` |
+### Estimation method
 
-### Threat Levels
+- **Track history:** maintains timestamped normalized bounding-box width and horizontal position per tracker ID.
+- **Apparent-expansion TTC:** fits a line to log(box width) over time. For positive expansion slope (s), the approximate TTC is (1/s). The estimate is withheld until enough history is available.
+- **Cut-in estimate:** extrapolates normalized horizontal track motion and checks whether the projected bottom-center enters the configured ego corridor within one second.
+- **Resolution-independent geometry:** the default trapezoid is normalized to image coordinates, so it scales to the actual frame dimensions.
+- **Stale-track cleanup:** track history is discarded after the track has been absent for one second.
 
-- **Level 0 (CRUISE)** - Small green pill indicator in top-right corner. No threats detected.
-- **Level 1 (CAUTION)** - Orange banner. Object closing in or sign detected.
-- **Level 2 (EMERGENCY)** - Full-width red banner with threat highlighted. Brake immediately.
+The default corridor is a configurable image-space region. It is **not lane detection**. Replace it with a calibrated lane polygon or a lane model before interpreting it as the vehicle's actual path. The cut-in projection uses raw image-space motion and does not compensate for ego-vehicle translation, yaw, pitch, or camera vibration; those effects can create false lateral-motion estimates.
 
-### Visual Overlays
+### Important limitations
 
-- **Yellow trapezoid** - Ego-lane projection zone
-- **Red dashed line** - Critical proximity boundary
-- **Red filled box** - Object triggering emergency brake
-- **Orange box** - Object triggering caution
-- **Orange arrow** - Predicted cut-in trajectory
+This is an experimental visual risk estimator, not a braking controller and not a validated AEB function. Bounding-box expansion is affected by camera motion, object orientation, detector jitter, occlusion, and tracker ID switches. It does not provide metric distance, relative speed in m/s, road friction, stopping distance, or vehicle dynamics. The TTC value must be treated as an approximate research signal, not a guaranteed time-to-collision. The overlay does not send commands to the car.
 
-### Design Notes
+The estimator is covered by unit tests:
 
-- Pedestrians trigger at a **lower threshold** than vehicles (brake sooner for people)
-- Proximity detection is the **primary** brake trigger (simple, reliable, no history needed)
-- TTC from bounding box growth is a **secondary** trigger (needs 5+ frames of tracking history)
-- Only active in **Street Mode** - ego-lane detection does not apply to Webcam Desk Mode
-- Expanded class list in braking mode adds traffic light (class 9) and stop sign (class 11)
+```bash
+python -m unittest discover -s tests -v
+```
+
+GitHub Actions also compiles the Python sources and runs this suite on pushes and pull requests.
 
 ---
 
@@ -163,7 +160,81 @@ The existing webcam monitor can load the custom checkpoint without confusing its
 python ModelBenchmark.py --pedestrian-weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
 ```
 
-Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the ADAS overlay while in that mode. All five custom person classes are passed to the pedestrian braking rules; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
+Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the collision-risk overlay while in that mode. All five custom person classes are passed to the pedestrian risk estimator; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
+
+## Labelled-dataset accuracy evaluation
+
+Use `EvaluateModel.py` to validate a checkpoint against ground-truth annotations. This reports precision, recall, F1 and mAP metrics overall and per class, plus the lowest-F1 validation images.
+
+Run on the validation split:
+
+```bash
+python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt
+```
+
+Run the final evaluation on a held-out test split:
+
+```bash
+python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt --split test
+```
+
+Useful options include `--imgsz`, `--batch`, `--device`, `--conf`, `--iou`, `--top-images`, and `--output`. The default JSON report is written under `runs/evaluation/`. Keep the test split untouched until model selection and tuning are complete.
+
+## Collision-risk testing on recorded video
+
+Use `RiskVideoBenchmark.py` to test the complete detection → tracking → risk-estimation pipeline on a recorded drive or simulator recording. Unlike `VideoBenchmark.py`, this script uses persistent tracker IDs and feeds the tracks into the collision-risk estimator.
+
+For a COCO-pretrained YOLO checkpoint:
+
+```bash
+python RiskVideoBenchmark.py \
+  --source videos/drive.mp4 \
+  --weights yolo26n.pt \
+  --classes 0 1 2 3 5 7 \
+  --pedestrian-class-ids 0 \
+  --vehicle-class-ids 1 2 3 5 7 \
+  --tracker bytetrack.yaml
+```
+
+For the custom five-class pedestrian checkpoint:
+
+```bash
+python RiskVideoBenchmark.py \
+  --source videos/drive.mp4 \
+  --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt \
+  --classes 0 1 2 3 4 \
+  --pedestrian-class-ids 0 1 2 3 4
+```
+
+The custom pedestrian checkpoint does not detect vehicles, so this run evaluates pedestrian risk only. Add a separate vehicle detector or a unified trained class set for mixed pedestrian/vehicle risk assessment.
+
+By default the runner writes:
+
+- `<video>_risk.mp4`: annotated detections, track IDs, risk levels and the configured ego corridor.
+- `<video>_risk.csv`: frame timestamp, inference/processing latency, risk level, reason and per-object estimates.
+- `<video>_risk.json`: aggregate latency, FPS and risk-frame counts.
+
+Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --half` for CUDA FP16, or `--no-save-video` to skip MP4 output. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+
+## CARLA simulation workflow
+
+CARLA is a good next test environment because you can repeat scenarios and vary traffic, weather, lighting and actor motion. Start with offline recordings before connecting the detector to a live simulation loop:
+
+1. Start CARLA and spawn an ego vehicle with a front-facing RGB camera.
+2. Enable synchronous mode and a fixed simulation step (for example, `fixed_delta_seconds = 0.05`, or 20 simulation frames per second). Keep exactly one client responsible for ticking the world.
+3. Record the camera frames to an MP4 at the same nominal FPS as the fixed simulation step. Preserve the scenario settings and recording metadata.
+4. Run the MP4 through `RiskVideoBenchmark.py` using the same model and thresholds for every scenario.
+5. Repeat with controlled scenarios: lead vehicle braking, pedestrian crossing, vehicle cut-in, parked vehicles, intersections, night and rain. Compare risk-level timing and false alerts across scenarios.
+
+CARLA documentation:
+- [Synchrony and fixed time-step](https://carla.readthedocs.io/en/latest/adv_synchrony_timestep/)
+- [ROS bridge sensor support](https://carla.readthedocs.io/en/latest/ros_documentation/)
+
+CARLA's synchronous mode with a fixed step is important for repeatable timing. Camera sensors can arrive with rendering delay, so use frame IDs/timestamps and a queue when capturing multiple sensors. If you later connect through ROS 2, use simulation time and make sure only one client advances the world.
+
+### What this test does and does not prove
+
+This verifies that the detector, tracker and risk estimator execute on recorded scenarios, and lets you inspect the timing and warnings. It does **not** yet calculate risk-estimation accuracy against CARLA ground truth. For a proper research evaluation, the next addition should compare predictions against CARLA actor transforms/velocities and collision events, reporting TTC error, event recall, false-positive rate and warning lead time. A front-camera video alone cannot provide that ground truth.
 
 ## Fixed-video inference and benchmark
 
