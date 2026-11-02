@@ -62,7 +62,7 @@ Press `B` in Street Mode or Pedestrian Attribute Mode to enable the visual risk 
 - **Resolution-independent geometry:** the default trapezoid is normalized to image coordinates, so it scales to the actual frame dimensions.
 - **Stale-track cleanup:** track history is discarded after the track has been absent for one second.
 
-The default corridor is a configurable image-space region. It is **not lane detection**. Replace it with a calibrated lane polygon or a lane model before interpreting it as the vehicle's actual path.
+The default corridor is a configurable image-space region. It is **not lane detection**. Replace it with a calibrated lane polygon or a lane model before interpreting it as the vehicle's actual path. The cut-in projection uses raw image-space motion and does not compensate for ego-vehicle translation, yaw, pitch, or camera vibration; those effects can create false lateral-motion estimates.
 
 ### Important limitations
 
