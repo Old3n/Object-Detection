@@ -1,4 +1,5 @@
-﻿import time
+﻿import argparse
+import time
 from collections import defaultdict, deque
 import cv2
 import numpy as np
@@ -16,6 +17,14 @@ except ImportError:
 WEBCAM_DESK_CLASSES = [0, 39, 41, 67]        # person, bottle, cup, cell phone
 IRAN_STREET_CLASSES = [0, 1, 2, 3, 5, 7]     # person, bicycle, car, motorcycle, bus, truck
 ROAD_AND_CROSSROAD_CLASSES = [0, 1, 2, 3, 5, 7, 9, 11]  # vehicles + traffic light (9), stop sign (11)
+PEDESTRIAN_ATTRIBUTE_CLASSES = [0, 1, 2, 3, 4]  # child, woman, elderly, wheelchair user, other person
+EXPECTED_PEDESTRIAN_NAMES = {
+    0: "child",
+    1: "woman",
+    2: "elderly_person",
+    3: "person_with_wheelchair",
+    4: "other_person",
+}
 
 
 def write_tracker_yamls():
@@ -90,7 +99,12 @@ class BrakingDecisionController:
     def in_ego_lane(self, x, y):
         return cv2.pointPolygonTest(self.ego_polygon, (float(x), float(y)), False) >= 0
 
-    def evaluate_frame(self, tracked_objects, frame):
+    def evaluate_frame(self, tracked_objects, frame, pedestrian_class_ids=None):
+        pedestrian_classes = (
+            self.PEDESTRIAN_CLASSES
+            if pedestrian_class_ids is None
+            else set(pedestrian_class_ids)
+        )
         now = time.perf_counter()
         command = "CRUISE"
         trigger_reason = ""
@@ -120,7 +134,7 @@ class BrakingDecisionController:
             self.track_history[tid].append((now, box_w, bottom_center_x, bottom_y))
             hist = self.track_history[tid]
 
-            is_pedestrian = cls_id in self.PEDESTRIAN_CLASSES
+            is_pedestrian = cls_id in pedestrian_classes
             is_vehicle = cls_id in self.VEHICLE_CLASSES
             is_sign = cls_id in self.SIGN_CLASSES
             in_lane = self.in_ego_lane(bottom_center_x, bottom_y)
@@ -205,7 +219,7 @@ class BrakingDecisionController:
 
 
 class LiveMonitorBenchmark:
-    def __init__(self, camera_id=0):
+    def __init__(self, camera_id=0, pedestrian_weights=None):
         write_tracker_yamls()
 
         if not torch.cuda.is_available():
@@ -227,8 +241,34 @@ class LiveMonitorBenchmark:
         }
         self.ocsort = OCSORT(det_thresh=0.30, max_age=60, min_hits=2, iou_threshold=0.25) if HAS_BOXMOT else None
 
+        self.pedestrian_model_cfg = None
+        if pedestrian_weights:
+            weights_path = str(pedestrian_weights)
+            custom_model = YOLO(weights_path).to(self.device)
+            custom_names = custom_model.names
+            for class_id, expected_name in EXPECTED_PEDESTRIAN_NAMES.items():
+                actual_name = (
+                    custom_names.get(class_id, custom_names.get(str(class_id)))
+                    if isinstance(custom_names, dict)
+                    else custom_names[class_id] if class_id < len(custom_names) else None
+                )
+                if actual_name != expected_name:
+                    raise ValueError(
+                        f"Custom checkpoint class mismatch at ID {class_id}: "
+                        f"expected '{expected_name}', found '{actual_name}'. "
+                        "Train with data/pedestrian_attributes.yaml."
+                    )
+            self.pedestrian_model_cfg = {
+                "name": "Custom Pedestrian Attributes",
+                "yolo": custom_model,
+                "tracker": "iran_bytetrack.yaml",
+                "mode": "ultralytics",
+            }
+            print(f"[OK] Loaded custom pedestrian checkpoint: {weights_path}")
+
         self.active_slot = 1
         self.street_mode = False
+        self.pedestrian_mode = False
         self.braking_enabled = False
         self.cap = cv2.VideoCapture(camera_id)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -255,19 +295,23 @@ class LiveMonitorBenchmark:
             self.ocsort = OCSORT(det_thresh=0.30, max_age=60, min_hits=2, iou_threshold=0.25)
 
     def run(self):
-        names_map = self.models[1]["yolo"].names
         while self.cap.isOpened():
             t_frame_start = time.perf_counter()
             ret, frame = self.cap.read()
             if not ret:
                 break
 
-            if self.street_mode:
+            if self.pedestrian_mode:
+                active_classes = PEDESTRIAN_ATTRIBUTE_CLASSES
+                cfg = self.pedestrian_model_cfg
+            elif self.street_mode:
                 active_classes = ROAD_AND_CROSSROAD_CLASSES if self.braking_enabled else IRAN_STREET_CLASSES
+                cfg = self.models[self.active_slot]
             else:
                 active_classes = WEBCAM_DESK_CLASSES
+                cfg = self.models[self.active_slot]
 
-            cfg = self.models[self.active_slot]
+            names_map = cfg["yolo"].names
             t_inf_start = time.perf_counter()
 
             tracked_objects = []
@@ -316,8 +360,13 @@ class LiveMonitorBenchmark:
                 for i in range(1, len(pts)):
                     cv2.line(frame, pts[i - 1], pts[i], color, 2)
 
-            if self.braking_enabled and self.street_mode:
-                self.braking_controller.evaluate_frame(tracked_objects, frame)
+            if self.braking_enabled and (self.street_mode or self.pedestrian_mode):
+                pedestrian_ids = (
+                    PEDESTRIAN_ATTRIBUTE_CLASSES if self.pedestrian_mode else [0]
+                )
+                self.braking_controller.evaluate_frame(
+                    tracked_objects, frame, pedestrian_class_ids=pedestrian_ids
+                )
 
             loop_fps = 1.0 / max(time.perf_counter() - t_frame_start, 1e-5)
             self.fps_window.append(loop_fps)
@@ -342,11 +391,21 @@ class LiveMonitorBenchmark:
                 self.active_slot = int(chr(key))
                 self.reset_current_metrics()
             elif key == ord("w"):
+                self.pedestrian_mode = False
                 self.street_mode = False
                 self.reset_current_metrics()
             elif key == ord("s"):
+                self.pedestrian_mode = False
                 self.street_mode = True
                 self.reset_current_metrics()
+            elif key == ord("p"):
+                if self.pedestrian_model_cfg is None:
+                    print("[WARN] Start with --pedestrian-weights path/to/best.pt to enable this mode.")
+                else:
+                    self.pedestrian_mode = not self.pedestrian_mode
+                    if self.pedestrian_mode:
+                        self.street_mode = False
+                    self.reset_current_metrics()
             elif key == ord("b"):
                 self.braking_enabled = not self.braking_enabled
                 if not self.braking_enabled:
@@ -360,9 +419,12 @@ class LiveMonitorBenchmark:
     def draw_hud(self, frame, model_name, active_count, avg_fps, avg_ms, avg_life):
         h, w = frame.shape[:2]
         cv2.rectangle(frame, (0, 0), (w, 85), (20, 20, 20), -1)
-        mode_str = "STREET MODE" if self.street_mode else "WEBCAM DESK MODE"
+        if self.pedestrian_mode:
+            mode_str = "PEDESTRIAN ATTRIBUTE MODE"
+        else:
+            mode_str = "STREET MODE" if self.street_mode else "WEBCAM DESK MODE"
 
-        if self.braking_enabled and self.street_mode:
+        if self.braking_enabled and (self.street_mode or self.pedestrian_mode):
             mode_str += " + ADAS BRAKING"
 
         fps_color = (0, 255, 0) if avg_fps >= 28 else ((0, 200, 255) if avg_fps >= 18 else (0, 0, 255))
@@ -373,12 +435,14 @@ class LiveMonitorBenchmark:
                     (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.60, fps_color, 2)
 
         cv2.rectangle(frame, (0, h - 115), (w, h), (15, 15, 15), -1)
-        cv2.putText(frame, "HOTKEYS: [1] M1  [2] M2  [3] M3  |  [W] Webcam  [S] Street  [B] Braking ADAS  [R] Reset  [Q] Quit",
+        cv2.putText(frame, "HOTKEYS: [1] M1  [2] M2  [3] M3  |  [W] Webcam  [S] Street  [P] Pedestrian Attributes  [B] Braking ADAS  [R] Reset  [Q] Quit",
                     (15, h - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.50, (180, 180, 180), 1)
 
         for slot in [1, 2, 3]:
             s = self.scoreboard[slot]
             m_title = self.models[slot]["name"]
+            if self.pedestrian_mode and slot == self.active_slot:
+                m_title = self.pedestrian_model_cfg["name"]
             y_pos = h - 65 + (slot - 1) * 22
             prefix = ">> " if slot == self.active_slot else "   "
             col = (0, 255, 255) if slot == self.active_slot else (200, 200, 200)
@@ -387,5 +451,19 @@ class LiveMonitorBenchmark:
 
 
 if __name__ == "__main__":
-    bench = LiveMonitorBenchmark(camera_id=0)
+    parser = argparse.ArgumentParser(
+        description="Live multi-model object tracking and ADAS benchmark."
+    )
+    parser.add_argument("--camera", type=int, default=0, help="Webcam device index.")
+    parser.add_argument(
+        "--pedestrian-weights",
+        default=None,
+        help="Optional custom checkpoint trained with data/pedestrian_attributes.yaml.",
+    )
+    cli_args = parser.parse_args()
+
+    bench = LiveMonitorBenchmark(
+        camera_id=cli_args.camera,
+        pedestrian_weights=cli_args.pedestrian_weights,
+    )
     bench.run()
