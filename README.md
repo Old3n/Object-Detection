@@ -180,6 +180,62 @@ python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/
 
 Useful options include `--imgsz`, `--batch`, `--device`, `--conf`, `--iou`, `--top-images`, and `--output`. The default JSON report is written under `runs/evaluation/`. Keep the test split untouched until model selection and tuning are complete.
 
+## Collision-risk testing on recorded video
+
+Use `RiskVideoBenchmark.py` to test the complete detection → tracking → risk-estimation pipeline on a recorded drive or simulator recording. Unlike `VideoBenchmark.py`, this script uses persistent tracker IDs and feeds the tracks into the collision-risk estimator.
+
+For a COCO-pretrained YOLO checkpoint:
+
+```bash
+python RiskVideoBenchmark.py \
+  --source videos/drive.mp4 \
+  --weights yolo26n.pt \
+  --classes 0 1 2 3 5 7 \
+  --pedestrian-class-ids 0 \
+  --vehicle-class-ids 1 2 3 5 7 \
+  --tracker bytetrack.yaml
+```
+
+For the custom five-class pedestrian checkpoint:
+
+```bash
+python RiskVideoBenchmark.py \
+  --source videos/drive.mp4 \
+  --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt \
+  --classes 0 1 2 3 4 \
+  --pedestrian-class-ids 0 1 2 3 4
+```
+
+The custom pedestrian checkpoint does not detect vehicles, so this run evaluates pedestrian risk only. Add a separate vehicle detector or a unified trained class set for mixed pedestrian/vehicle risk assessment.
+
+By default the runner writes:
+
+- `<video>_risk.mp4`: annotated detections, track IDs, risk levels and the configured ego corridor.
+- `<video>_risk.csv`: frame timestamp, inference/processing latency, risk level, reason and per-object estimates.
+- `<video>_risk.json`: aggregate latency, FPS and risk-frame counts.
+
+Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --half` for CUDA FP16, or `--no-save-video` to skip MP4 output. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+
+## CARLA simulation workflow
+
+CARLA is a good next test environment because you can repeat scenarios and vary traffic, weather, lighting and actor motion. Start with offline recordings before connecting the detector to a live simulation loop:
+
+1. Start CARLA and spawn an ego vehicle with a front-facing RGB camera.
+2. Enable synchronous mode and a fixed simulation step (for example, `fixed_delta_seconds = 0.05`, or 20 simulation frames per second). Keep exactly one client responsible for ticking the world.
+3. Record the camera frames to an MP4 at the same nominal FPS as the fixed simulation step. Preserve the scenario settings and recording metadata.
+4. Run the MP4 through `RiskVideoBenchmark.py` using the same model and thresholds for every scenario.
+5. Repeat with controlled scenarios: lead vehicle braking, pedestrian crossing, vehicle cut-in, parked vehicles, intersections, night and rain. Compare risk-level timing and false alerts across scenarios.
+
+CARLA documentation:
+- [Synchrony and fixed time-step](https://carla.readthedocs.io/en/latest/adv_synchrony_timestep/)
+- [ROS bridge sensor support](https://carla.readthedocs.io/en/latest/ros_documentation/)
+
+CARLA's synchronous mode with a fixed step is important for repeatable timing. Camera sensors can arrive with rendering delay, so use frame IDs/timestamps and a queue when capturing multiple sensors. If you later connect through ROS 2, use simulation time and make sure only one client advances the world.
+
+### What this test does and does not prove
+
+This verifies that the detector, tracker and risk estimator execute on recorded scenarios, and lets you inspect the timing and warnings. It does **not** yet calculate risk-estimation accuracy against CARLA ground truth. For a proper research evaluation, the next addition should compare predictions against CARLA actor transforms/velocities and collision events, reporting TTC error, event recall, false-positive rate and warning lead time. A front-camera video alone cannot provide that ground truth.
+
 ## Fixed-video inference and benchmark
 
 `VideoBenchmark.py` runs a trained YOLO checkpoint on a local video file. It saves an annotated MP4, a per-frame CSV, and a summary JSON by default.
