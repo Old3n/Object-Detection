@@ -1,6 +1,9 @@
 import math
 import unittest
 
+import numpy as np
+
+from adas.lane_detection import LaneDetector
 from adas.risk_assessment import CAUTION, CLEAR, HIGH, CollisionRiskAssessor
 
 
@@ -94,6 +97,56 @@ class CollisionRiskAssessorTests(unittest.TestCase):
             timestamp=2.0,
         )
         self.assertIsNone(report.objects[0].ttc_seconds)
+
+    def test_dynamic_lane_corridor_overrides_default_roi(self):
+        assessor = CollisionRiskAssessor()
+        left_corridor = (
+            (0.05, 0.40), (0.40, 0.40), (0.40, 0.95), (0.05, 0.95)
+        )
+        report = assessor.update(
+            [(590, 300, 690, 620, 42, 0.9, 0)],
+            (720, 1280),
+            timestamp=1.0,
+            ego_corridor=left_corridor,
+        )
+        self.assertFalse(report.objects[0].in_ego_corridor)
+        self.assertEqual(report.corridor, left_corridor)
+
+    def test_lane_detector_does_not_invent_lane_on_blank_frame(self):
+        detector = LaneDetector(max_hold_frames=0)
+        estimate = detector.detect(np.zeros((720, 1280, 3), dtype=np.uint8))
+        self.assertEqual(estimate.status, "NOT_DETECTED")
+        self.assertIsNone(estimate.corridor)
+
+    def test_lane_detector_finds_synthetic_left_and_right_markings(self):
+        import cv2
+
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.line(frame, (470, 410), (180, 695), (255, 255, 255), 12)
+        cv2.line(frame, (810, 410), (1100, 695), (255, 255, 255), 12)
+        estimate = LaneDetector(max_hold_frames=0).detect(frame)
+        self.assertEqual(estimate.status, "DETECTED")
+        self.assertIsNotNone(estimate.corridor)
+        self.assertLess(estimate.corridor[0][0], estimate.corridor[1][0])
+        self.assertLess(estimate.corridor[3][0], estimate.corridor[2][0])
+
+    def test_lane_detector_uses_short_track_when_markings_disappear(self):
+        import cv2
+
+        detector = LaneDetector(max_hold_frames=2)
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        cv2.line(frame, (470, 410), (180, 695), (255, 255, 255), 12)
+        cv2.line(frame, (810, 410), (1100, 695), (255, 255, 255), 12)
+        first = detector.detect(frame)
+        self.assertEqual(first.status, "DETECTED")
+
+        missing = detector.detect(np.zeros_like(frame))
+        self.assertEqual(missing.status, "TRACKED")
+        self.assertIsNotNone(missing.corridor)
+
+        detector.detect(np.zeros_like(frame))
+        expired = detector.detect(np.zeros_like(frame))
+        self.assertEqual(expired.status, "NOT_DETECTED")
 
 
 if __name__ == "__main__":
