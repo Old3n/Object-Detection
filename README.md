@@ -180,106 +180,194 @@ python EvaluateModel.py --weights runs/pedestrian/yolo26n-pedestrian-attributes/
 
 Useful options include `--imgsz`, `--batch`, `--device`, `--conf`, `--iou`, `--top-images`, and `--output`. The default JSON report is written under `runs/evaluation/`. Keep the test split untouched until model selection and tuning are complete.
 
-## Collision-risk testing on recorded video
+## JAAD pedestrian attributes and video evaluation
 
-Use `RiskVideoBenchmark.py` to test the complete detection → tracking → risk-estimation pipeline on a recorded drive or simulator recording. Unlike `VideoBenchmark.py`, this script uses persistent tracker IDs and feeds the tracks into the collision-risk estimator.
+Keep the JAAD clips you want to use in the repository's `videos/` directory. The scripts process only the clips you place there; they do not download or select videos automatically.
 
-For a COCO-pretrained YOLO checkpoint:
+### 1. Get the JAAD annotations
 
-```bash
-python RiskVideoBenchmark.py \
-  --source videos/drive.mp4 \
-  --weights yolo26n.pt \
-  --classes 0 1 2 3 5 7 \
-  --pedestrian-class-ids 0 \
-  --vehicle-class-ids 1 2 3 5 7 \
-  --tracker bytetrack.yaml
+The videos alone provide no ground-truth demographic labels. Download the matching JAAD_2.0 XML annotation files from the official annotation repository:
+
+```powershell
+git clone --depth 1 --branch JAAD_2.0 https://github.com/ykotseruba/JAAD.git jaad_annotations
 ```
 
-For the custom five-class pedestrian checkpoint:
+The converter needs these two directories:
 
-```bash
-python RiskVideoBenchmark.py \
-  --source videos/drive.mp4 \
-  --weights runs/pedestrian/yolo26n-pedestrian-attributes/weights/best.pt \
-  --classes 0 1 2 3 4 \
-  --pedestrian-class-ids 0 1 2 3 4
+- `jaad_annotations/annotations/` — per-frame pedestrian boxes and track IDs.
+- `jaad_annotations/annotations_attributes/` — per-pedestrian age and gender.
+
+### 2. Convert your selected clips to YOLO training data
+
+```powershell
+python tools/prepare_jaad_dataset.py \
+  --videos-dir videos \
+  --annotations-dir jaad_annotations/annotations \
+  --attributes-dir jaad_annotations/annotations_attributes \
+  --output-dir datasets/jaad_pedestrian \
+  --frame-stride 5 \
+  --val-ratio 0.2
 ```
 
-The custom pedestrian checkpoint does not detect vehicles, so this run evaluates pedestrian risk only. Add a separate vehicle detector or a unified trained class set for mixed pedestrian/vehicle risk assessment.
+The converter matches filenames such as `videos/video_0001.mp4` to `video_0001.xml`, samples one frame every five video frames, converts the pedestrian boxes to YOLO labels, and splits whole videos into train/validation sets. Splitting by video prevents neighbouring frames from the same clip appearing in both sets. At least two selected clips with matching XML files are required.
 
-By default the runner writes:
+JAAD age/gender annotations map to these classes:
 
-- `<video>_risk.mp4`: annotated detections, track IDs, risk levels and the configured ego corridor.
-- `<video>_risk.csv`: frame timestamp, inference/processing latency, risk level, reason and per-object estimates.
-- `<video>_risk.json`: aggregate latency, FPS and risk-frame counts.
+| YOLO ID | Class | JAAD rule |
+|---:|---|---|
+| 0 | `child` | age = child |
+| 1 | `woman` | gender = female, except child/senior |
+| 2 | `elderly_person` | age = senior |
+| 3 | `person_with_wheelchair` | reserved; JAAD does not supply wheelchair boxes |
+| 4 | `other_person` | other pedestrians or missing demographic attributes |
 
-Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --quantize fp16` for CUDA FP16, or `--no-save-video` to skip MP4 output. The preview now includes a larger status header, separate raw-detection and tracked-object counts, a per-object risk/TTC panel, per-class counts, video position/duration, inference and loop latency, FPS, model/tracker/device, and a risk legend. Use `--ui-scale 1.3` to enlarge the overlay further or `--max-display-objects 12` to show more tracks. Its display size does not change the resolution of the saved MP4. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+JAAD provides demographic attributes only for its behavior-annotated pedestrian subset. Other pedestrian boxes are retained as `other_person`, rather than guessing age or gender. The wheelchair class will not be learned from JAAD alone; add a separately annotated wheelchair dataset before expecting this class to work.
 
-## Longer real-world footage: KITTI
+The converter writes `datasets/jaad_pedestrian/pedestrian_attributes.yaml` and `conversion_summary.json`.
 
-The short NVIDIA clip is useful for a smoke test, but for longer continuous driving footage use the KITTI odometry dataset. Sequence `00` contains 4,541 frames (about 7 minutes 34 seconds at the native 10 Hz). KITTI provides the camera recordings as numbered image frames rather than an MP4.
+### 3. Train the pedestrian attribute detector
 
-Official download page: https://www.cvlibs.net/datasets/kitti/eval_odometry.php
+```powershell
+python train_pedestrian_model.py \
+  --data datasets/jaad_pedestrian/pedestrian_attributes.yaml \
+  --model yolo26n.pt \
+  --epochs 100 \
+  --imgsz 640 \
+  --batch 8 \
+  --device 0 \
+  --name jaad-pedestrian-attributes
+```
 
-The grayscale odometry archive is 22 GB. The color archive is 65 GB. KITTI requires registration/login for downloads. For this detector test, the grayscale archive is sufficient; choose sequence `00` and use its `image_0` camera directory. The odometry sequence layout is:
+The resulting custom checkpoint is normally:
 
 ```text
-dataset/
-  sequences/
-    00/
-      image_0/
-      image_1/
-      times.txt
-      calib.txt
+runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt
 ```
 
-Convert the image sequence to MP4 from the repository root:
-
-```powershell
-python tools/kitti_to_video.py \
-  --frames "D:\datasets\KITTI\dataset\sequences\00\image_0" \
-  --output videos/kitti_00.mp4 \
-  --fps 10
-```
-
-Then run the full detection, tracking, and collision-risk pipeline:
+### 4. Run all perception components on a selected JAAD clip
 
 ```powershell
 python RiskVideoBenchmark.py \
-  --source videos/kitti_00.mp4 \
+  --source videos/video_0001.mp4 \
   --weights yolo26n.pt \
-  --classes 0 1 2 3 5 7 \
-  --pedestrian-class-ids 0 \
-  --vehicle-class-ids 1 2 3 5 7 \
+  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \
   --tracker bytetrack.yaml \
+  --device 0 \
   --quantize fp16 \
-  --ui-scale 1.3 \
-  --max-display-objects 12 \
-  --show
+  --show \
+  --ui-scale 1.3
 ```
 
-The output should be approximately 7.5 minutes. The KITTI odometry recordings are grayscale and run at 10 Hz, so preserve `--fps 10` when converting; changing the playback FPS changes the time base used by TTC estimation. KITTI supplies synchronized camera, LiDAR, GPS/IMU and calibration data, but this converter uses only the selected image stream.
+The runner uses two independent detectors:
 
-## CARLA simulation workflow
+- **COCO YOLO26:** cars (class 2), buses (5), trucks (7), and traffic lights (9).
+- **JAAD-trained pedestrian model:** child, woman, elderly person, wheelchair user (only after separate training data), and other person.
 
-CARLA is a good next test environment because you can repeat scenarios and vary traffic, weather, lighting and actor motion. Start with offline recordings before connecting the detector to a live simulation loop:
+The models have separate tracker ID and class-ID namespaces before their detections are combined. This prevents custom class ID 2 (elderly person) from being interpreted as COCO class 2 (car).
 
-1. Start CARLA and spawn an ego vehicle with a front-facing RGB camera.
-2. Enable synchronous mode and a fixed simulation step (for example, `fixed_delta_seconds = 0.05`, or 20 simulation frames per second). Keep exactly one client responsible for ticking the world.
-3. Record the camera frames to an MP4 at the same nominal FPS as the fixed simulation step. Preserve the scenario settings and recording metadata.
-4. Run the MP4 through `RiskVideoBenchmark.py` using the same model and thresholds for every scenario.
-5. Repeat with controlled scenarios: lead vehicle braking, pedestrian crossing, vehicle cut-in, parked vehicles, intersections, night and rain. Compare risk-level timing and false alerts across scenarios.
+Without `--pedestrian-weights`, COCO only detects a generic `person`; it cannot identify child/woman/senior labels. Traffic lights are detected by the pretrained COCO model. JAAD's traffic annotations are frame-level presence labels, not traffic-light bounding boxes, so they are not converted into fabricated detection boxes.
 
-CARLA documentation:
-- [Synchrony and fixed time-step](https://carla.readthedocs.io/en/latest/adv_synchrony_timestep/)
-- [ROS bridge sensor support](https://carla.readthedocs.io/en/latest/ros_documentation/)
+### 5. Lane detection
 
-CARLA's synchronous mode with a fixed step is important for repeatable timing. Camera sensors can arrive with rendering delay, so use frame IDs/timestamps and a queue when capturing multiple sensors. If you later connect through ROS 2, use simulation time and make sure only one client advances the world.
+The video runner also estimates the ego-lane corridor using a classical OpenCV baseline: white/yellow marking cues, Canny edges, a road-region mask, and Hough line fitting. The dashboard reports `DETECTED`, `TRACKED` (briefly held from recent frames), or `NOT_DETECTED`.
 
-### What this test does and does not prove
+When both lane boundaries are found, the detected polygon is supplied to the collision-risk estimator. If lane markings are not visible, the system explicitly reports that lane detection failed and uses the fallback image ROI for risk estimation. That fallback is not the actual lane. The current lane detector is a research baseline, not a trained lane-segmentation network; it can fail on curves, intersections, worn markings, shadows, and rain.
 
-This verifies that the detector, tracker and risk estimator execute on recorded scenarios, and lets you inspect the timing and warnings. It does **not** yet calculate risk-estimation accuracy against CARLA ground truth. For a proper research evaluation, the next addition should compare predictions against CARLA actor transforms/velocities and collision events, reporting TTC error, event recall, false-positive rate and warning lead time. A front-camera video alone cannot provide that ground truth.
+### 6. Batch-run your hand-picked videos
+
+```powershell
+.\tools\run_jaad_videos.ps1 \
+  -VideosDir videos \
+  -PedestrianWeights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \
+  -Device 0 \
+  -Quantize fp16
+```
+
+Add `-Show` to display each clip while it runs. Results are written separately for each selected video under `runs/jaad_results/`.
+
+Each run writes an annotated MP4, per-frame CSV and JSON summary. The CSV includes lane state/confidence as well as detections, tracking, object risk, and TTC estimates. Use the CSV/JSON files to compare clips; inference FPS and risk labels are not accuracy metrics by themselves.
+
+## Live testing with webcams and in-car cameras
+
+\`RiskVideoBenchmark.py\` accepts three source types:
+
+- A local video path, such as \`videos/video_0001.mp4\`.
+- A USB camera index, such as \`0\` or \`1\`.
+- An RTSP/HTTP stream URL from an IP camera.
+
+### USB webcam
+
+On Windows, test camera index 0 using DirectShow:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source 0 \`
+  --weights yolo26n.pt \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend dshow \`
+  --capture-width 1280 \`
+  --capture-height 720 \`
+  --max-seconds 120 \`
+  --show
+\`\`\`
+
+If DirectShow cannot open the webcam, try Media Foundation:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py --source 0 --weights yolo26n.pt --device 0 --quantize fp16 --camera-backend msmf --max-seconds 120 --show
+\`\`\`
+
+For another USB camera, use its device index (for example, \`--source 1\`). The camera must be exposed to Windows as a video-capture device.
+
+### USB camera with pedestrian attributes
+
+After training the JAAD pedestrian checkpoint, run both detectors together:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source 0 \`
+  --weights yolo26n.pt \`
+  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
+  --classes 2 5 7 9 \`
+  --tracker bytetrack.yaml \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend dshow \`
+  --max-seconds 120 \`
+  --show
+\`\`\`
+
+The general COCO model detects cars (2), buses (5), trucks (7), and traffic lights (9). The custom model detects child, woman, elderly person, person-with-wheelchair (only if separately trained with wheelchair examples), and other person.
+
+Without \`--pedestrian-weights\`, the COCO model detects only a generic person category; it cannot distinguish child, woman, or elderly person.
+
+### IP / Wi-Fi camera (RTSP or HTTP)
+
+Use the RTSP/HTTP stream URL supplied by the camera or its configuration application:
+
+\`\`\`powershell
+python RiskVideoBenchmark.py \`
+  --source "rtsp://USERNAME:PASSWORD@CAMERA_IP:554/STREAM_PATH" \`
+  --weights yolo26n.pt \`
+  --pedestrian-weights runs/pedestrian/jaad-pedestrian-attributes/weights/best.pt \`
+  --classes 2 5 7 9 \`
+  --device 0 \`
+  --quantize fp16 \`
+  --camera-backend ffmpeg \`
+  --max-seconds 180 \`
+  --show
+\`\`\`
+
+Replace the URL with the actual stream address for your camera. Do not assume every V380 model uses the same RTSP path. Avoid publishing a URL containing camera credentials.
+
+For live sources, \`--max-seconds\` stops the capture automatically. Press \`Q\` or \`Esc\` in the preview to stop early. By default, each live run writes an MP4, CSV and JSON report under \`runs/live_camera/\`.
+
+### Testing more than one car camera
+
+Run each camera index or stream URL as a separate test. For example, use \`--source 0\` for the front USB camera and \`--source 1\` for a second USB camera. This version processes one feed per process; it does not yet synchronize or fuse several camera streams into one shared vehicle coordinate system. Use the front-facing camera for lane detection and ego-lane risk assessment.
+
+A camera module must be available to Windows as a USB video device or network stream. A bare image sensor that is not exposed through a capture interface cannot be opened directly by OpenCV.
 
 ## Fixed-video inference and benchmark
 
