@@ -214,7 +214,7 @@ By default the runner writes:
 - `<video>_risk.csv`: frame timestamp, inference/processing latency, risk level, reason and per-object estimates.
 - `<video>_risk.json`: aggregate latency, FPS and risk-frame counts.
 
-Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --quantize fp16` for CUDA FP16, or `--no-save-video` to skip MP4 output. The preview now includes a readable status header, object/risk list, class counts, and processing metrics. Its display size does not change the resolution of the saved MP4. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
+Use `--show` for live display, `--max-frames N` for a shorter run, `--device 0 --quantize fp16` for CUDA FP16, or `--no-save-video` to skip MP4 output. The preview now includes a larger status header, separate raw-detection and tracked-object counts, a per-object risk/TTC panel, per-class counts, video position/duration, inference and loop latency, FPS, model/tracker/device, and a risk legend. Use `--ui-scale 1.3` to enlarge the overlay further or `--max-display-objects 12` to show more tracks. Its display size does not change the resolution of the saved MP4. Risk TTC uses video frame timestamps derived from the file FPS; recordings with dropped or duplicated frames can therefore distort estimates.
 
 ## Longer real-world footage: KITTI
 
@@ -254,6 +254,8 @@ python RiskVideoBenchmark.py \
   --vehicle-class-ids 1 2 3 5 7 \
   --tracker bytetrack.yaml \
   --quantize fp16 \
+  --ui-scale 1.3 \
+  --max-display-objects 12 \
   --show
 ```
 
