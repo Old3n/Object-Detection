@@ -98,8 +98,11 @@ def make_server(host: str, port: int, detector: Detector, token: str) -> Threadi
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; frame-ancestors 'none'; object-src 'none'")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
         def json_reply(self, status: int, value: dict):
             self.reply(status, json.dumps(value).encode(), "application/json")
