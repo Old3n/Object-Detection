@@ -847,9 +847,7 @@ def main() -> int:
             if writer is not None:
                 writer.write(annotated)
             if args.show:
-                # Resize the clean frame first, then draw the dashboard at preview
-                # resolution. Otherwise the dashboard text gets shrunk along with
-                # a high-resolution source video and becomes unreadable.
+                # Draw after resizing so high-resolution inputs keep readable labels.
                 frame_height, frame_width = frame.shape[:2]
                 scale = min(
                     1.0,

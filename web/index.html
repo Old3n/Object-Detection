@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#121717"><meta name="description" content="AutoPilot visual perception workspace">
+<title>AutoPilot · Perception Studio</title>
+<link rel="manifest" href="/manifest.webmanifest"><link rel="icon" href="/icon-192.png"><link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<aside class="rail"><a href="/" class="monogram" aria-label="AutoPilot home">A<span>•</span></a><span class="rail-label">PERCEPTION STUDIO</span><span class="version">01</span></aside>
+<div class="workspace">
+<header><a href="/" class="brand">AutoPilot<span> / perception studio</span></a><div class="header-actions"><span id="connection" class="status">Connecting</span><button id="install" class="subtle" hidden>Install app ↗</button></div></header>
+<main>
+<div class="heading"><div><p class="eyebrow">COMPUTER VISION WORKSPACE</p><h1>A clearer view.<br><span>Frame by frame.</span></h1></div><p class="intro">Explore what your model sees.<br>Live detection. Measurable results.</p></div>
+<section id="auth" class="auth" hidden><label for="key">Connect to your detector</label><div><input id="key" type="password" autocomplete="off" placeholder="Access key from the server console"><button id="connect">Connect</button></div></section>
+<div class="studio-grid">
+<section class="viewer-card" aria-label="Detection workspace">
+<div class="panel-heading"><span><i class="dot"></i> <strong id="source-label">INPUT / NO SOURCE</strong></span><span id="dimensions">READY WHEN YOU ARE</span></div>
+<div class="viewport" id="viewport"><video id="video" muted playsinline hidden></video><canvas id="output" hidden></canvas><div id="empty"><div class="viewfinder">+</div><h2>Bring a scene into focus</h2><p>Open your camera or choose an image or video.<br>Your frames are processed by your connected detector.</p><button id="empty-camera">Start camera <span>↗</span></button><small>Camera access stays under your control.</small></div><span class="feed-label" id="feed-label" hidden>DETECTION VIEW</span></div>
+<div class="toolbar"><button id="camera">Camera ↗</button><label class="button secondary" for="file">Open file <span>+</span><input type="file" id="file" accept="image/*,video/*"></label><button id="stop" class="subtle" disabled>Stop ■</button><span class="private-note">Frames are not saved on the server</span></div>
+</section>
+<aside class="inspector"><div class="panel-heading"><strong>SESSION CONTROLS</strong><span>01</span></div><div class="settings"><label for="confidence">Confidence threshold <output id="confidence-value">35%</output></label><input id="confidence" type="range" min="5" max="95" value="35"><div class="range-labels"><span>More detections</span><span>Higher certainty</span></div><div class="model-info"><span class="eyebrow">ACTIVE MODEL</span><strong id="model">Waiting for backend</strong><span id="device">—</span></div><div class="metric-grid"><div><span>Objects</span><strong id="count">—</strong></div><div><span>Inference</span><strong id="latency">—<small> ms</small></strong></div></div><div class="results-header"><h2>Detections</h2><span id="result-count">0</span></div><ul id="detections"><li class="no-results">Results will appear here.</li></ul><button id="export" class="secondary full" disabled>Export frame results ↓</button></div></aside>
+</div>
+<div id="message" role="status" aria-live="polite">Choose an input to start. The first frame may take longer while the model loads.</div>
+<footer><span><i class="dot"></i> BUILT FOR EXPLORATION</span><p>Detection workspace · Tracking, lane analysis, and advisory risk tools are available through the Python CLI.</p></footer>
+</main>
+</div>
+</body>
+</html>

@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import time
 from collections import defaultdict, deque
 import cv2
@@ -18,7 +18,7 @@ except ImportError:
 WEBCAM_DESK_CLASSES = [0, 39, 41, 67]
 IRAN_STREET_CLASSES = [0, 1, 2, 3, 5, 7]
 ROAD_AND_CROSSROAD_CLASSES = [0, 1, 2, 3, 5, 7, 9, 11]
-PEDESTRIAN_ATTRIBUTE_CLASSES = [0, 1, 2, 3, 4]  # child, woman, elderly, wheelchair user, other person
+PEDESTRIAN_ATTRIBUTE_CLASSES = [0, 1, 2, 3, 4]
 EXPECTED_PEDESTRIAN_NAMES = {
     0: "child",
     1: "woman",

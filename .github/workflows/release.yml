@@ -1,0 +1,84 @@
+name: Build desktop and PWA
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+    branches: ['feature/dashboard-pwa-release', 'release/**']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install CPU runtime and packager
+        run: |
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt "pyinstaller>=6.11,<7"
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Download and validate bundled model
+        run: python -c "from ultralytics import YOLO; YOLO('yolo26n.pt')"
+      - name: Build single executable
+        run: python -m PyInstaller --noconfirm --clean AutoPilot.spec
+      - name: Test packaged model and assets
+        run: |
+          & .\dist\AutoPilot.exe --self-test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPilot.exe --tool risk --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPilot.exe --tool surround --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Record dependency versions
+        run: python -m pip freeze > dist/build-dependencies.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoPilot-windows-x64
+          path: |
+            dist/AutoPilot.exe
+            dist/build-dependencies.txt
+          if-no-files-found: error
+
+  pwa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Package PWA and backend source
+        run: python tools/package_pwa.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoPilot-pwa
+          path: dist/AutoPilot-pwa.zip
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/v')
+    needs: [windows, pwa]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish verified release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          RELEASE_TAG="${GITHUB_REF#refs/tags/}"
+          if [[ "$GITHUB_REF" == refs/heads/release/v* ]]; then RELEASE_TAG="${GITHUB_REF#refs/heads/release/}"; fi
+          sha256sum dist/AutoPilot.exe dist/AutoPilot-pwa.zip > dist/SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" dist/AutoPilot.exe dist/AutoPilot-pwa.zip dist/SHA256SUMS.txt dist/build-dependencies.txt --target "$GITHUB_SHA" --generate-notes --title "AutoPilot $RELEASE_TAG"

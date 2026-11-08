@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+build/
+dist/
+*.pt
+*.onnx
+runs/
+datasets/
+videos/
+node_modules/
+iran_bytetrack.yaml
+iran_botsort.yaml
+data/surround_cameras.json
