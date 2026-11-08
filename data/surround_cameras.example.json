@@ -1,0 +1,7 @@
+{
+  "front": {"source": 0},
+  "left": {"source": 1},
+  "right": {"source": 2},
+  "rear_left": {"source": 3},
+  "rear_right": {"source": 4}
+}

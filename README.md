@@ -370,7 +370,7 @@ For RTSP/HTTP streams, use \`--camera-backend ffmpeg\` or \`auto\`. A sample URL
 
 Each live run accepts \`--max-seconds\` to stop automatically and saves an MP4, CSV and JSON under \`runs/live_camera/\`. Press Q or Esc to stop the preview early.
 
-**One feed per process:** this runner tests one camera source at a time. It does not yet synchronize multiple cameras or fuse them into a shared vehicle coordinate system. For lane detection and ego-lane risk estimation, use a forward-facing camera mounted securely and aligned with the vehicle. This is a research prototype; do not interact with the phone or laptop while driving.
+**One feed per process:** this runner tests one camera source at a time; `SurroundCameraBenchmark.py` launches five independent workers (see below). It does not yet synchronize multiple cameras or fuse them into a shared vehicle coordinate system. For lane detection and ego-lane risk estimation, use a forward-facing camera mounted securely and aligned with the vehicle. This is a research prototype; do not interact with the phone or laptop while driving.
 
 ## Fixed-video inference and benchmark
 
@@ -413,3 +413,88 @@ python VideoBenchmark.py --source videos/test.mp4 --weights path/to/best.pt \
 Warm-up frames are excluded from the benchmark statistics but remain in the annotated output video. Use `--show` only for visual inspection because GUI display can reduce throughput. For fair model comparisons, use the same video, image size, confidence/IoU thresholds, device, precision and warm-up count, and benchmark models separately.
 
 **Detection counts and FPS are not accuracy metrics.** To calculate precision, recall, or mAP, you also need ground-truth annotations for the benchmark video and an evaluation procedure that matches predictions to those labels. A video without ground truth can benchmark speed and show qualitative detections, but cannot establish detection accuracy.
+
+
+## Five-camera side and rear warnings
+
+The camera layout is `front`, `left`, `right`, `rear_left`, and `rear_right`.
+The default `front` mode keeps the existing lane detector, fallback corridor,
+class filters and collision-risk decisions. Existing front commands still work.
+
+The four new modes use camera-local **image warning regions**, without running
+front lane detection or front cut-in prediction:
+
+- **Left/right:** CAUTION when a tracked pedestrian, bicycle, motorcycle, car,
+  bus or truck occupies the warning region, even without measurable expansion.
+- **Rear-left/rear-right:** occupancy warnings plus apparent-approach escalation.
+- All four views escalate to HIGH at apparent TTC <=3s and CRITICAL at <=1.5s.
+  TTC comes from bounding-box expansion, not measured range or closing speed.
+- Objects outside the region and non-obstacle classes do not trigger warnings.
+  A missing track removes its current warning; an empty region is not proof that
+  a lane change is safe. Track history expires after one second of absence.
+
+### Run a single side/rear camera
+
+Find the actual device indices with `tools/list_cameras.py`, then for example:
+
+```powershell
+python RiskVideoBenchmark.py --source 1 --camera-position left --weights yolo26n.pt --max-seconds 60 --show
+```
+
+Video paths and RTSP/HTTP sources work the same way. `--pedestrian-weights`
+continues to support the custom pedestrian checkpoint. Each MP4, CSV and JSON is
+labelled with its camera position. CSV object records retain the existing
+`in_ego_corridor` field; in surround modes this means **inside warning ROI**.
+Lane status is `NOT_APPLICABLE` for side/rear views.
+
+### Run all five cameras
+
+Copy `data/surround_cameras.example.json` to `data/surround_cameras.json` and edit
+its source assignments to match your hardware. The example indices 0–4 are
+placeholders, not discovered devices. Each source can be an integer index, URL or
+video filename; relative video paths are resolved relative to the config file.
+Then run:
+
+```powershell
+python SurroundCameraBenchmark.py --config data/surround_cameras.json --weights yolo26n.pt --device 0 --quantize fp16 --max-seconds 60 --show
+```
+
+Model, capture and display flags are forwarded to every worker. Each worker has
+its own detector, tracker and risk history, so identical track IDs from different
+cameras cannot mix. Outputs go to a timestamped directory under `runs/surround/`,
+with separate `front`, `left`, `right`, `rear_left` and `rear_right` MP4/CSV/JSON
+files. Use `--output-dir` to choose a different destination. A failed worker stops
+the launcher and remaining workers with a nonzero exit code.
+
+Five model instances (ten with the custom pedestrian detector) need more GPU
+memory and compute. Start with one camera, then lower `--imgsz` or capture
+resolution if necessary. Use `--max-seconds` for live sources or `--max-frames`
+for files to finish cleanly and write reports. Q/Esc finishes a preview worker;
+Ctrl+C stops the launcher but forcibly stopped workers may not finish reports.
+
+### Adjust the warning regions for your mounts
+
+The default polygon covers x=0.05–0.95 and y=0.30–1.0 in normalized image
+coordinates. Left and right use the same default because image orientation and
+mirroring depend on your camera installation. This region must be adjusted for
+the actual view; it is not a calibrated physical blind spot.
+
+Save a JSON polygon such as `data/left_roi.json`:
+
+```json
+[[0.2, 0.3], [0.8, 0.3], [0.95, 1.0], [0.05, 1.0]]
+```
+
+For a single camera add `--warning-roi data/left_roi.json`. For the launcher add
+`"warning_roi": "left_roi.json"` to that camera's config entry (resolved relative
+to the config file). The front camera rejects this override to preserve its
+existing lane logic.
+
+The five feeds are processed independently, without synchronized timestamps,
+cross-camera object fusion, steering, braking or lane-change authorization.
+These are advisory university-project annotations. Camera motion, occlusion and
+tracking errors affect the outputs; validate the ROI and behavior on recordings
+from each mount. Automated tests cover occupancy, approach/recession, ROI scaling,
+custom pedestrian IDs, track isolation/expiry, launcher configuration and all
+five runner modes using synthetic videos and a detector stand-in. They do not
+establish real-camera detection accuracy or five-camera GPU throughput.

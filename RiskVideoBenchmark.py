@@ -18,7 +18,8 @@ import cv2
 import torch
 from ultralytics import YOLO
 
-from adas.lane_detection import LaneDetector
+from adas.lane_detection import LaneDetector, LaneEstimate
+from adas.surround_risk import SURROUND_POSITIONS, SurroundRiskAssessor
 from adas.risk_assessment import (
     CAUTION,
     CLEAR,
@@ -155,8 +156,10 @@ def draw_report(
     margin = max(10, round(16 * scale))
     thickness = max(1, round(2 * scale))
 
+    camera_position = stats.get("camera_position", "front")
+    surround = camera_position != "front"
     lane_status = str(stats.get("lane_status", "NOT_DETECTED"))
-    if lane_status in {"DETECTED", "TRACKED"}:
+    if surround or lane_status in {"DETECTED", "TRACKED"}:
         polygon = [
             (round(x * width), round(y * height))
             for x, y in report.corridor
@@ -228,6 +231,8 @@ def draw_report(
     perf_y = round(122 * scale)
     lane_y = round(153 * scale)
     title = f"ADAS PERCEPTION  |  COLLISION RISK: {report.level}"
+    if surround:
+        title = f"{camera_position.upper()} CAMERA  |  WARNING: {report.level}"
     cv2.putText(
         frame, title, (margin, title_y), font, 0.90 * scale,
         risk_color, thickness + 1, cv2.LINE_AA,
@@ -267,6 +272,8 @@ def draw_report(
         if lane_status in {"DETECTED", "TRACKED"}
         else "LANE: NOT DETECTED  |  COLLISION CHECK USES FALLBACK IMAGE ROI"
     )
+    if surround:
+        lane_text = f"{camera_position.upper()}: IMAGE WARNING ROI"
     lane_color = (0, 220, 0) if lane_status == "DETECTED" else (
         (0, 190, 255) if lane_status == "TRACKED" else (0, 165, 255)
     )
@@ -368,6 +375,8 @@ def draw_report(
         (245, 245, 245), max(1, thickness - 1), cv2.LINE_AA,
     )
     legend = "RISK GUIDE: CLEAR  |  CAUTION 3-5s  |  HIGH 1.5-3s  |  CRITICAL <=1.5s"
+    if surround:
+        legend = "CAUTION: ROI OCCUPIED | HIGH/CRITICAL: APPARENT APPROACH | ADVISORY ONLY"
     cv2.putText(
         frame, legend, (margin, legend_y), font, 0.43 * scale,
         (190, 205, 220), max(1, thickness - 1), cv2.LINE_AA,
@@ -382,6 +391,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source", required=True, type=str,
         help="Video path, USB camera index (0, 1, ...), or RTSP/HTTP camera URL.",
+    )
+    parser.add_argument("--camera-position", choices=("front",) + SURROUND_POSITIONS, default="front")
+    parser.add_argument(
+        "--warning-roi", type=Path, default=None,
+        help="Side/rear ROI JSON file containing normalized [[x,y], ...] points.",
     )
     parser.add_argument(
         "--weights",
@@ -416,7 +430,7 @@ def parse_args() -> argparse.Namespace:
         "--vehicle-class-ids",
         type=int,
         nargs="+",
-        default=[2, 5, 7],
+        default=None,
         help="Class IDs treated as vehicles by the risk estimator.",
     )
     parser.add_argument("--max-frames", type=int, default=None)
@@ -465,6 +479,13 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.vehicle_class_ids is None:
+        args.vehicle_class_ids = [2, 5, 7] if args.camera_position == "front" else [1, 2, 3, 5, 7]
+    warning_roi = None
+    if args.warning_roi is not None:
+        if args.camera_position == "front":
+            raise ValueError("--warning-roi is only for side/rear cameras; front lane logic is unchanged.")
+        warning_roi = json.loads(args.warning_roi.read_text(encoding="utf-8"))
     is_live, capture_source, source_label, source_path = resolve_source(args.source)
     source_display = source_label if is_live else str(source_path)
     weights_path = Path(args.weights).expanduser()
@@ -502,6 +523,8 @@ def main() -> int:
         default_stem = Path("runs/live_camera") / f"{source_label}_{live_stamp}_risk"
     else:
         default_stem = source_path.with_name(f"{source_path.stem}_risk")
+    if args.camera_position != "front":
+        default_stem = default_stem.with_name(f"{default_stem.name}_{args.camera_position}")
     output = (
         args.output.expanduser().resolve()
         if args.output
@@ -596,7 +619,10 @@ def main() -> int:
     if args.classes is not None:
         general_classes = list(args.classes)
     else:
-        general_classes = [2, 5, 7, 9] if pedestrian_model else [0, 2, 5, 7, 9]
+        if args.camera_position == "front":
+            general_classes = [2, 5, 7, 9] if pedestrian_model else [0, 2, 5, 7, 9]
+        else:
+            general_classes = [1, 2, 3, 5, 7] if pedestrian_model else [0, 1, 2, 3, 5, 7]
     if pedestrian_model is not None:
         general_classes = [class_id for class_id in general_classes if class_id != 0]
         if not general_classes:
@@ -628,7 +654,13 @@ def main() -> int:
         pedestrian_class_ids=risk_pedestrian_ids,
         vehicle_class_ids=args.vehicle_class_ids,
     )
-    lane_detector = LaneDetector()
+    if args.camera_position != "front":
+        assessor = SurroundRiskAssessor(
+            args.camera_position, warning_roi=warning_roi,
+            pedestrian_class_ids=risk_pedestrian_ids,
+            vehicle_class_ids=args.vehicle_class_ids,
+        )
+    lane_detector = LaneDetector() if args.camera_position == "front" else None
     print(f"[INFO] General COCO classes: {general_classes}")
     if pedestrian_model is None:
         print("[WARN] No --pedestrian-weights supplied: people are generic COCO 'person' detections.")
@@ -654,7 +686,7 @@ def main() -> int:
     print(f"[INFO] Device: {device}, precision: {'FP16' if use_fp16 else 'FP32'}")
     print(f"[INFO] Tracker: {args.tracker}")
 
-    window_title = "YOLO tracking + collision-risk assessment (Q/Esc to stop)"
+    window_title = f"{args.camera_position.upper()} | YOLO tracking + risk (Q/Esc to stop)"
     if args.show:
         cv2.namedWindow(window_title, cv2.WINDOW_AUTOSIZE)
 
@@ -747,7 +779,10 @@ def main() -> int:
 
             sync_cuda(device)
             inference_ms = (time.perf_counter() - inference_start) * 1000.0
-            lane_estimate = lane_detector.detect(frame)
+            lane_estimate = (
+                lane_detector.detect(frame) if lane_detector is not None
+                else LaneEstimate("NOT_APPLICABLE", 0.0, None, None, None, 0, 0)
+            )
             lane_corridor = (
                 lane_estimate.corridor
                 if lane_estimate.status in {"DETECTED", "TRACKED"}
@@ -762,13 +797,14 @@ def main() -> int:
                 tracked_objects,
                 frame.shape,
                 timestamp=video_timestamp,
-                ego_corridor=lane_corridor,
+                **({"ego_corridor": lane_corridor} if args.camera_position == "front" else {}),
             )
             frame_count += 1
             loop_ms = (time.perf_counter() - frame_start) * 1000.0
             elapsed_so_far = max(time.perf_counter() - start, 1e-6)
             current_fps = frame_count / elapsed_so_far
             display_stats = {
+                "camera_position": args.camera_position,
                 "frame": frame_count,
                 "total_frames": total_frames,
                 "video_seconds": video_timestamp,
@@ -860,13 +896,16 @@ def main() -> int:
                     "ttc_seconds": item.ttc_seconds,
                     "cut_in_eta_seconds": item.cut_in_eta_seconds,
                     "in_ego_corridor": item.in_ego_corridor,
+                    "reason": item.reason,
                 }
                 for item in report.objects
             ]
             frame_rows.append(
                 {
+                    "camera_position": args.camera_position,
                     "frame": frame_count,
-                    "timestamp_seconds": frame_count / fps if fps > 0 else None,
+                    "timestamp_seconds": (frame_count / fps if fps > 0 else None)
+                    if args.camera_position == "front" else video_timestamp,
                     "inference_ms": round(inference_ms, 4),
                     "processing_ms": round(processing_ms, 4),
                     "raw_detections": raw_detection_count,
@@ -900,6 +939,8 @@ def main() -> int:
         raise RuntimeError("No frames were processed.")
     elapsed = time.perf_counter() - start
     summary = {
+        "camera_position": args.camera_position,
+        "warning_roi": list(assessor.estimator.ego_corridor) if args.camera_position != "front" else None,
         "source": source_display,
         "live_source": is_live,
         "weights": weights_ref,
@@ -938,14 +979,15 @@ def main() -> int:
         },
         "limitations": [
             "TTC is estimated from monocular apparent bounding-box expansion.",
-            "The ego corridor is an image-space ROI, not an automatically detected lane.",
+            "Surround ROIs are image regions, not calibrated vehicle-space blind spots."
+            if args.camera_position != "front" else "Lane detection is a classical baseline with a fallback image ROI.",
             "Risk levels are research annotations, not validated braking decisions.",
         ],
     }
 
     with csv_path.open("w", newline="", encoding="utf-8") as file:
         fields = [
-            "frame", "timestamp_seconds", "inference_ms", "processing_ms",
+            "camera_position", "frame", "timestamp_seconds", "inference_ms", "processing_ms",
             "raw_detections", "tracked_objects", "class_counts",
             "lane_status", "lane_confidence",
             "risk_level", "risk_reason", "objects",
