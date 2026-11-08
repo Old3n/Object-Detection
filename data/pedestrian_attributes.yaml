@@ -1,4 +1,4 @@
-# One class per person; overlap precedence is defined in README.md.
+# One class per person; overlap precedence is defined in docs/RESEARCH_GUIDE.md.
 path: ../datasets/pedestrian_attributes
 train: images/train
 val: images/val

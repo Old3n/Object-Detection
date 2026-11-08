@@ -11,7 +11,6 @@ from adas.risk_assessment import CAUTION, CLEAR, CollisionRiskAssessor, FrameRis
 
 SURROUND_POSITIONS = ("left", "right", "rear_left", "rear_right")
 # Identical defaults intentionally avoid assuming mirrored or asymmetric optics.
-# Adjust each ROI to the mounting angle using --warning-roi.
 DEFAULT_WARNING_ROI = ((0.05, 0.30), (0.95, 0.30), (0.95, 1.0), (0.05, 1.0))
 
 
