@@ -2,13 +2,16 @@ import http.client
 import json
 from pathlib import Path
 import threading
+import tempfile
+import sys
 import unittest
 from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from AutoPilot import Detector, MAX_UPLOAD, make_server
+from AutoPilot import Detector, MAX_UPLOAD, dispatch_tool, make_server
+from SurroundCameraBenchmark import build_commands, POSITIONS
 
 
 class FakeDetector:
@@ -100,6 +103,31 @@ class DashboardTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             detector.predict(image.tobytes(), .35)
         self.assertIsNone(detector.model)
+
+
+class PackagedCliTests(unittest.TestCase):
+    def test_dispatch_preserves_tool_arguments_and_adds_default_weights(self):
+        with patch('AutoPilot.runpy.run_module') as run, patch.object(sys, 'argv', []):
+            self.assertTrue(dispatch_tool(['--tool', 'risk', '--source', '0']))
+            run.assert_called_once_with('RiskVideoBenchmark', run_name='__main__')
+            self.assertEqual(sys.argv[1:3], ['--source', '0'])
+            self.assertEqual(sys.argv[-2], '--weights')
+        with patch('AutoPilot.runpy.run_module'), patch.object(sys, 'argv', []):
+            dispatch_tool(['--tool', 'video', '--weights=custom.pt'])
+            self.assertEqual(sys.argv[1:], ['--weights=custom.pt'])
+        self.assertFalse(dispatch_tool(['--port', '8765']))
+        with self.assertRaises(SystemExit):
+            dispatch_tool(['--tool', 'unknown'])
+
+    def test_frozen_surround_workers_relaunch_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'cameras.json'
+            config.write_text(json.dumps({position: {'source': i} for i, position in enumerate(POSITIONS)}))
+            with patch.object(sys, 'frozen', True, create=True):
+                commands = build_commands(config, Path(directory), [])
+            self.assertEqual(len(commands), 5)
+            for command in commands:
+                self.assertEqual(command[:3], [sys.executable, '--tool', 'risk'])
 
 
 if __name__ == '__main__':

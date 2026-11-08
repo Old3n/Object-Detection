@@ -8,7 +8,7 @@
 
 The UI renders the corresponding submitted frame and exports its result. It never caches inference responses. `sw.js` caches only the public application shell, which opens offline but cannot infer without the backend. Camera streams are released on Stop, page exit, and backgrounding. Browser permissions and available codecs vary by device.
 
-The executable contains the dashboard/backend, CPU dependencies, and default checkpoint. Research/training CLI tools remain in the source repository and are not embedded as executable subcommands.
+The executable contains the dashboard/backend, CPU dependencies, and default checkpoint. The original CLI tools are embedded through `--tool`; external datasets, camera configuration, and custom checkpoints are supplied by the user. Surround workers relaunch the executable with `--tool risk` in frozen builds. The CPU release cannot run the legacy CUDA-only monitor; use a GPU build for that tool.
 
 ## Windows single-file build
 

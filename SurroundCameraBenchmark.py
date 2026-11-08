@@ -45,8 +45,10 @@ def build_commands(config_path: Path, output_dir: Path, extra_args: list[str]) -
             if not Path(source).is_file():
                 raise FileNotFoundError(f"{position}: video not found: {source}")
         stem = output_dir.resolve() / position
-        command = [
+        runner = [sys.executable, "--tool", "risk"] if getattr(sys, "frozen", False) else [
             sys.executable, str(Path(__file__).with_name("RiskVideoBenchmark.py")),
+        ]
+        command = runner + [
             "--source", source, "--camera-position", position,
             "--output", str(stem.with_suffix(".mp4")),
             "--csv", str(stem.with_suffix(".csv")),

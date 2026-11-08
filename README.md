@@ -68,6 +68,19 @@ The web dashboard performs detection only. Tracking, lane corridors, TTC, and mu
 
 A plain `http://192.168…` LAN address does not enable Android camera access or normal PWA installation. The interface is cached offline; inference is not. This port is a connected PWA, not an APK or an on-device Python runtime. Restarting the backend generates a new access key.
 
+## Packaged CLI tools
+
+The same executable also includes the original Python entry points:
+
+```powershell
+.\AutoPilot.exe --tool risk --source 0 --show
+.\AutoPilot.exe --tool video --source videos/test.mp4
+.\AutoPilot.exe --tool surround --config data/surround_cameras.json
+.\AutoPilot.exe --tool cameras --max-index 8
+```
+
+Additional tools: `monitor`, `evaluate`, `train`, `jaad`, and `kitti`. Pass `--help` after the tool name for its options. Risk/video/surround use the bundled checkpoint unless `--weights` is supplied. Supply your own datasets/config files and custom weights. The legacy monitor requires CUDA and a GPU build; OC-SORT remains an optional source dependency. Training and evaluation still need external data. Source mode also accepts `python AutoPilot.py --tool ...`.
+
 ## Tests
 
 In a fresh virtual environment:
@@ -80,6 +93,16 @@ node --check web/sw.js
 ```
 
 Tests use synthetic images/videos and a detector stand-in, without downloading model weights. They cover the risk estimators, lane detection, all five camera modes, output reports, dashboard authentication, invalid uploads, and static assets. GitHub Actions runs the suite on Windows and Linux with Python 3.11/3.12. The release build additionally runs real inference through the packaged executable.
+
+Optional browser acceptance checks (uses a deterministic detector, not a downloaded model):
+
+```bash
+python -m pip install playwright Pillow
+python -m playwright install chromium
+python tools/check_dashboard.py
+```
+
+This exercises desktop/mobile layout, image results, JSON export, camera lifecycle with a synthetic browser camera, and offline shell loading. Physical Android installation and camera performance still need device testing.
 
 ## Build and publish
 

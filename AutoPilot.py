@@ -6,6 +6,8 @@ import argparse
 import hmac
 import json
 import math
+import multiprocessing
+import runpy
 import secrets
 import sys
 import threading
@@ -16,6 +18,13 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+CLI_TOOLS = {
+    "risk": "RiskVideoBenchmark", "video": "VideoBenchmark",
+    "surround": "SurroundCameraBenchmark", "monitor": "ModelBenchmark",
+    "evaluate": "EvaluateModel", "train": "train_pedestrian_model",
+    "cameras": "tools.list_cameras", "jaad": "tools.prepare_jaad_dataset",
+    "kitti": "tools.kitti_to_video",
+}
 MAX_UPLOAD = 8 * 1024 * 1024
 ASSETS = {
     "/": ("index.html", "text/html; charset=utf-8"),
@@ -145,7 +154,23 @@ def make_server(host: str, port: int, detector: Detector, token: str) -> Threadi
     return ThreadingHTTPServer((host, port), Handler)
 
 
+def dispatch_tool(arguments: list[str]) -> bool:
+    if not arguments or arguments[0] != "--tool":
+        return False
+    if len(arguments) < 2 or arguments[1] not in CLI_TOOLS:
+        raise SystemExit("Choose --tool " + "|".join(CLI_TOOLS))
+    tool = arguments[1]
+    forwarded = arguments[2:]
+    if tool in {"risk", "video", "surround"} and not any(arg.split("=", 1)[0] == "--weights" for arg in forwarded):
+        forwarded += ["--weights", str(ROOT / "yolo26n.pt")]
+    sys.argv = [CLI_TOOLS[tool]] + forwarded
+    runpy.run_module(CLI_TOOLS[tool], run_name="__main__")
+    return True
+
+
 def main():
+    if dispatch_tool(sys.argv[1:]):
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
@@ -181,4 +206,5 @@ def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

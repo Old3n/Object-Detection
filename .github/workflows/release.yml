@@ -33,6 +33,10 @@ jobs:
         run: |
           & .\dist\AutoPilot.exe --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPilot.exe --tool risk --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\dist\AutoPilot.exe --tool surround --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Record dependency versions
         run: python -m pip freeze > dist/build-dependencies.txt
       - uses: actions/upload-artifact@v4

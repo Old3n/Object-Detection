@@ -2,7 +2,7 @@
 """Fine-tune a YOLO26 detector for pedestrian attribute categories.
 
 The dataset must use the directory structure described in
-data/pedestrian_attributes.yaml. See README.md for the annotation policy.
+data/pedestrian_attributes.yaml. See docs/RESEARCH_GUIDE.md for the annotation policy.
 """
 
 from __future__ import annotations

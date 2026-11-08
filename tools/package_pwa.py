@@ -10,7 +10,7 @@ def main():
     destination.parent.mkdir(exist_ok=True)
     files = [root / name for name in ('AutoPilot.py', 'requirements.txt', 'README.md')]
     files += sorted((root / 'web').glob('*'))
-    files += [root / 'docs' / 'PORTING.md']
+    files += [root / 'docs' / name for name in ('PORTING.md', 'RESEARCH_GUIDE.md')]
     with ZipFile(destination, 'w', ZIP_DEFLATED) as archive:
         for path in files:
             archive.write(path, path.relative_to(root))
