@@ -104,7 +104,27 @@ python tools/check_dashboard.py
 
 This exercises desktop/mobile layout, image results, JSON export, camera lifecycle with a synthetic browser camera, and offline shell loading. Physical Android installation and camera performance still need device testing.
 
-## Build and publish
+## Build and publish without GitHub Actions
+
+On Windows x64, install **Python 3.11 (64-bit)**, **Git**, and **GitHub CLI**. Open a new PowerShell window in a clean checkout of this repository and run:
+
+```powershell
+py -3.11 tools/build_release.py --publish --version v1.0.0
+```
+
+Choose an unused version. If needed, GitHub CLI opens its browser sign-in flow; sign in as an account with write access to `Old3n/Object-Detection`. No Actions account or subscription is used.
+
+The script creates a temporary isolated Python environment, installs CPU dependencies, runs the tests, builds the single-file executable, checks its actual model inference and CLI tools, packages the PWA, generates checksums, and uploads a new release at your exact Git commit. It stops on failure and never overwrites an existing release. Keep the terminal open; downloads and packaging can take a while and need several GB of free space.
+
+To build without uploading:
+
+```powershell
+py -3.11 tools/build_release.py
+```
+
+Files remain in `dist/`. The temporary build environment is removed when the script finishes. Publishing requires a clean Git checkout whose commit already exists on GitHub; a downloaded source ZIP can build but cannot publish with this helper. Android still needs the backend and HTTPS setup described above.
+
+### Manual build commands
 
 On Windows, using a clean Python 3.11 environment:
 

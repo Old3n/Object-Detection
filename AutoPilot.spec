@@ -5,7 +5,11 @@ a = Analysis(
     ['AutoPilot.py'],
     pathex=[],
     binaries=ultra_bins,
-    datas=[('web', 'web'), ('data', 'data'), ('yolo26n.pt', '.')] + ultra_data + copy_metadata('ultralytics'),
+    datas=[
+        ('web', 'web'), ('yolo26n.pt', '.'),
+        ('data/pedestrian_attributes.yaml', 'data'),
+        ('data/surround_cameras.example.json', 'data'),
+    ] + ultra_data + copy_metadata('ultralytics'),
     hiddenimports=ultra_hidden + [
         'RiskVideoBenchmark', 'VideoBenchmark', 'SurroundCameraBenchmark',
         'ModelBenchmark', 'EvaluateModel', 'train_pedestrian_model',
