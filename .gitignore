@@ -12,3 +12,9 @@ node_modules/
 iran_bytetrack.yaml
 iran_botsort.yaml
 data/surround_cameras.json
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/app/src/main/assets/*_names.json
+demo/street/

@@ -1,4 +1,4 @@
-# AutoPilot · Perception Studio
+﻿# AutoPilot · Perception Studio
 
 A desktop and Android-friendly workspace for object detection, backed by the project's Python/Ultralytics models. Open a camera, image, or video; inspect detections; adjust confidence; export the current frame's results.
 
@@ -45,6 +45,38 @@ python AutoPilot.py --weights yolo26n.pt --device 0
 ```
 
 GPU inference requires a matching CUDA-enabled PyTorch installation. The release executable targets CPU for portability; build a separate GPU variant if required. The optional legacy OC-SORT comparison also requires `pip install boxmot`.
+
+## Live demo: people, vehicles, lane, collision risk, Iranian signs, night boost
+
+`demo/full_demo.py` runs the whole perception stack in one window. It uses the repository modules: `adas/risk_assessment.py`, `adas/lane_detection.py`, `adas/road_signs.py` and the `RiskVideoBenchmark` dashboard.
+
+The demo has three scenes:
+
+1. Street photos.
+2. The same photos darkened to show the night boost.
+3. The live webcam with tracking.
+
+Scenes 1 and 2 read `.jpg` files from `demo/street/`. This folder is not committed. Without it, the demo starts on the live camera.
+
+The road-sign model is not in the repository. Pass an ITSD checkpoint such as `best_Fold1.pt`.
+
+```powershell
+python demo\full_demo.py --sign-weights path\to\best_Fold1.pt --start 3
+```
+
+The demo uses the GPU when CUDA PyTorch is installed and otherwise falls back to the CPU.
+
+Keys:
+
+- `1` / `2` / `3`: switch scene.
+- `N`: next photo.
+- `Space`: pause.
+- `D`: simulate darkness in the live scene.
+- `Q`: quit.
+
+To raise the risk level, walk toward the camera. To test signs, hold a stop sign or a 30-50 km/h sign up to the camera.
+
+For a full on-device Android build, see [android/README.md](android/README.md).
 
 ## Dashboard
 
