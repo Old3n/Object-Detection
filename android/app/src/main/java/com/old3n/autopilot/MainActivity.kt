@@ -2,6 +2,8 @@ package com.old3n.autopilot
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -20,6 +22,9 @@ import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import org.opencv.android.OpenCVLoader
 import org.opencv.core.Core
 import org.opencv.core.CvType
@@ -34,6 +39,14 @@ class MainActivity : AppCompatActivity() {
     private val analysis = Executors.newSingleThreadExecutor()
     private var mode = Pipeline.Mode.BALANCED
     private var rowBuffer = ByteArray(0)
+    private var analysisUseCase: ImageAnalysis? = null
+
+    // A 180-degree landscape flip changes no configuration, so listen to the display itself.
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(id: Int) {}
+        override fun onDisplayRemoved(id: Int) {}
+        override fun onDisplayChanged(id: Int) { analysisUseCase?.targetRotation = displayRotation() }
+    }
     private var lastFrameNs = 0L
     private var fps = 0f
 
@@ -42,7 +55,7 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         view = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER; setBackgroundColor(0xFF000000.toInt()) }
         status = TextView(this).apply { setTextColor(-1); textSize = 18f; gravity = Gravity.CENTER; text = "Loading models…" }
-        val controls = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val controls = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val night = Button(this).apply { text = "Night boost: AUTO" }
         val signs = Button(this).apply { text = "Signs: ON" }
         val reset = Button(this).apply { text = "Reset tracks" }
@@ -63,8 +76,17 @@ class MainActivity : AppCompatActivity() {
         listOf(quality, night, signs, reset).forEach { controls.addView(it) }
         setContentView(FrameLayout(this).apply {
             addView(view); addView(status)
-            addView(controls, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply { bottomMargin = 60 })
+            // Right edge, vertically centred: outside the 4:3 camera image on wide screens.
+            addView(controls, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER_VERTICAL or Gravity.END))
         })
+
+        // Full screen for car displays: hide status and navigation bars (swipe from an edge to show them).
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.systemBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(displayListener, null)
 
         if (!OpenCVLoader.initLocal()) { status.text = "OpenCV failed to load"; return }
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) start()
@@ -114,6 +136,8 @@ class MainActivity : AppCompatActivity() {
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                 .build()
+            useCase.targetRotation = displayRotation()
+            analysisUseCase = useCase
             useCase.setAnalyzer(analysis) { onFrame(it) }
             val camera = if (provider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)) CameraSelector.DEFAULT_BACK_CAMERA
             else CameraSelector.DEFAULT_FRONT_CAMERA
@@ -161,7 +185,20 @@ class MainActivity : AppCompatActivity() {
         return rotated
     }
 
-    override fun onDestroy() { super.onDestroy(); analysis.shutdown() }
+    @Suppress("DEPRECATION")
+    private fun displayRotation() = windowManager.defaultDisplay.rotation
+
+    // sensorLandscape can flip 180 degrees without recreating the activity; keep frames upright.
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        analysisUseCase?.targetRotation = displayRotation()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
+        analysis.shutdown()
+    }
 
     companion object { private const val TAG = "AutoPilot" }
 }
