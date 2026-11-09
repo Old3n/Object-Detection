@@ -132,7 +132,7 @@ Choose an unused version and tag the reviewed commit. For native macOS/Linux bui
 
 | Tool | Purpose |
 |---|---|
-| `ModelBenchmark.py` | GPU webcam comparison: YOLO26 variants and trackers |
+| `ModelBenchmark.py` | GPU webcam comparison: YOLO26 variants and trackers, optional Iranian road signs and night boost |
 | `VideoBenchmark.py` | Fixed-video inference with latency and output reports |
 | `RiskVideoBenchmark.py` | Single camera/video detection, tracking, lane and advisory risk |
 | `SurroundCameraBenchmark.py` | Five independent camera workers |

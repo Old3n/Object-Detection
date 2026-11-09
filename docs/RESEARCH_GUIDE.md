@@ -166,6 +166,21 @@ python ModelBenchmark.py --pedestrian-weights runs/pedestrian/yolo26n-pedestrian
 
 Press `P` to toggle Pedestrian Attribute Mode. Press `B` to enable/disable the collision-risk overlay while in that mode. All five custom person classes are passed to the pedestrian risk estimator; they are not interpreted as COCO bicycle/car IDs. Press `W` or `S` to return to the existing webcam or street modes, and `1`–`3` to switch back to the original COCO model comparisons. The checkpoint class names and IDs are checked at startup.
 
+## Iranian road signs and night boost
+
+`ModelBenchmark.py` can run a second checkpoint for Iranian road signs, such as the ITSD YOLO weights, in Street Mode (`S`):
+
+```bash
+python ModelBenchmark.py --sign-weights path/to/ITSD/best_Fold1.pt --night-boost
+```
+
+- Only target classes are drawn (orange boxes): stop (`d-xx-1`, COCO `stop sign`), ITSD speed limits `d-r-30`..`d-r-39`, junction (`w-r- intersection`, `junction_<type>`) and route boards (`r-g-k`, logged only). Custom checkpoints may also use `speed_<km/h>`.
+- Speed readings are limited to 10-50 km/h (`SPEED_MIN_KMH`/`SPEED_MAX_KMH` in `adas/road_signs.py`), so ITSD limits above 50 are ignored.
+- A sign is reported only after it appears in 3 consecutive frames; each newly confirmed sign is printed once as `[SIGN] confirmed: ...` and summarised on the HUD.
+- `--night-boost` applies CLAHE to the lightness channel when the frame mean is below 60 (0-255). The HUD shows `NIGHT BOOST` while it is active.
+
+These are class-name readings from a detector. Sign text and route destinations are not read, and no vehicle command is produced.
+
 ## Labelled-dataset accuracy evaluation
 
 Use `EvaluateModel.py` to validate a checkpoint against ground-truth annotations. This reports precision, recall, F1 and mAP metrics overall and per class, plus the lowest-F1 validation images.

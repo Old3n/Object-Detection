@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import time
 from collections import defaultdict, deque
 import cv2
@@ -8,6 +8,7 @@ import yaml
 from ultralytics import YOLO
 
 from adas.risk_assessment import CLEAR, CAUTION, HIGH, CRITICAL, CollisionRiskAssessor
+from adas.road_signs import SignConfirmer, boost_night, is_night, sign_kind, sign_text
 
 try:
     from boxmot import OCSORT
@@ -116,8 +117,45 @@ class CollisionRiskOverlay:
         return report.level, report.reason, frame
 
 
+class RoadSignOverlay:
+    """Draw Iranian road signs from a separate checkpoint, confirmed over frames."""
+
+    COLOR = (0, 140, 255)
+
+    def __init__(self, yolo, device):
+        self.yolo = yolo
+        self.device = device
+        self.confirmer = SignConfirmer()
+        self.confirmed = set()
+
+    def reset(self):
+        self.confirmer.reset()
+        self.confirmed = set()
+
+    def evaluate_frame(self, frame, conf=0.35, imgsz=640):
+        res = self.yolo.predict(frame, imgsz=imgsz, conf=conf, device=self.device, verbose=False)
+        readings = set()
+        boxes = res[0].boxes
+        if boxes is not None:
+            for b, cl, c in zip(boxes.xyxy.cpu().numpy(), boxes.cls.int().cpu().tolist(), boxes.conf.cpu().tolist()):
+                name = self.yolo.names.get(cl, str(cl))
+                reading = sign_kind(name)
+                if reading is None:
+                    continue
+                readings.add(reading)
+                x1, y1, x2, y2 = (int(v) for v in b)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), self.COLOR, 2)
+                cv2.putText(frame, f"{name} {c:.2f}", (x1, max(20, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, self.COLOR, 2)
+        confirmed = self.confirmer.update(readings)
+        for kind, value in sorted(confirmed - self.confirmed, key=str):
+            print(f"[SIGN] confirmed: {kind}{'' if value is None else f' {value}'}")
+        self.confirmed = confirmed
+        return confirmed
+
+
 class LiveMonitorBenchmark:
-    def __init__(self, camera_id=0, pedestrian_weights=None):
+    def __init__(self, camera_id=0, pedestrian_weights=None, sign_weights=None, night_boost=False):
         write_tracker_yamls()
 
         if not torch.cuda.is_available():
@@ -164,6 +202,13 @@ class LiveMonitorBenchmark:
             }
             print(f"[OK] Loaded custom pedestrian checkpoint: {weights_path}")
 
+        self.sign_overlay = None
+        if sign_weights:
+            self.sign_overlay = RoadSignOverlay(YOLO(str(sign_weights)).to(self.device), self.device)
+            print(f"[OK] Loaded road-sign checkpoint: {sign_weights}")
+        self.night_boost = night_boost
+        self.night_active = False
+
         self.active_slot = 1
         self.street_mode = False
         self.pedestrian_mode = False
@@ -189,6 +234,8 @@ class LiveMonitorBenchmark:
         self.id_frame_counts = defaultdict(int)
         self.trails = defaultdict(lambda: deque(maxlen=30))
         self.risk_overlay.reset()
+        if getattr(self, "sign_overlay", None) is not None:
+            self.sign_overlay.reset()
         if HAS_BOXMOT:
             self.ocsort = OCSORT(det_thresh=0.30, max_age=60, min_hits=2, iou_threshold=0.25)
 
@@ -198,6 +245,9 @@ class LiveMonitorBenchmark:
             ret, frame = self.cap.read()
             if not ret:
                 break
+            self.night_active = self.night_boost and is_night(frame)
+            if self.night_active:
+                frame = boost_night(frame)
 
             if self.pedestrian_mode:
                 active_classes = PEDESTRIAN_ATTRIBUTE_CLASSES
@@ -266,6 +316,11 @@ class LiveMonitorBenchmark:
                     tracked_objects, frame, pedestrian_class_ids=pedestrian_ids
                 )
 
+            if self.sign_overlay is not None and self.street_mode:
+                confirmed = self.sign_overlay.evaluate_frame(frame)
+                cv2.putText(frame, sign_text(confirmed), (15, 160),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, RoadSignOverlay.COLOR, 2)
+
             loop_fps = 1.0 / max(time.perf_counter() - t_frame_start, 1e-5)
             self.fps_window.append(loop_fps)
             avg_fps = sum(self.fps_window) / len(self.fps_window)
@@ -325,6 +380,8 @@ class LiveMonitorBenchmark:
 
         if self.risk_overlay_enabled and (self.street_mode or self.pedestrian_mode):
             mode_str += " + RISK ASSESSMENT"
+        if self.night_active:
+            mode_str += " + NIGHT BOOST"
 
         fps_color = (0, 255, 0) if avg_fps >= 28 else ((0, 200, 255) if avg_fps >= 18 else (0, 0, 255))
 
@@ -358,10 +415,22 @@ if __name__ == "__main__":
         default=None,
         help="Optional custom checkpoint trained with data/pedestrian_attributes.yaml.",
     )
+    parser.add_argument(
+        "--sign-weights",
+        default=None,
+        help="Optional Iranian road-sign checkpoint (e.g. ITSD); drawn in Street Mode.",
+    )
+    parser.add_argument(
+        "--night-boost",
+        action="store_true",
+        help="Apply CLAHE contrast enhancement to dark frames before detection.",
+    )
     cli_args = parser.parse_args()
 
     bench = LiveMonitorBenchmark(
         camera_id=cli_args.camera,
         pedestrian_weights=cli_args.pedestrian_weights,
+        sign_weights=cli_args.sign_weights,
+        night_boost=cli_args.night_boost,
     )
     bench.run()
