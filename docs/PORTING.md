@@ -10,6 +10,20 @@ The UI renders the corresponding submitted frame and exports its result. It neve
 
 The executable contains the dashboard/backend, CPU dependencies, and default checkpoint. The original CLI tools are embedded through `--tool`; external datasets, camera configuration, and custom checkpoints are supplied by the user. Surround workers relaunch the executable with `--tool risk` in frozen builds. The CPU release cannot run the legacy CUDA-only monitor; use a GPU build for that tool.
 
+## Local build and upload without Actions
+
+Install 64-bit Python 3.11, Git, and GitHub CLI on Windows x64. In a clean clone at the commit you want to release, run:
+
+```powershell
+py -3.11 tools/build_release.py --publish --version v1.0.0
+```
+
+Use an unused version. The script checks the signed-in GitHub account, write permission, remote commit, and tag/release availability before installing build dependencies. GitHub CLI handles browser login when needed; do not paste credentials into the script. It builds in a temporary environment with CPU PyTorch and runs tests before packaging. It then executes the packaged model self-test plus risk/surround CLI checks, creates the PWA archive, records dependency versions and checksums, and publishes through GitHub CLI at the exact commit that was built.
+
+Omit `--publish --version ...` to keep the verified artifacts locally. A failed test or build prevents upload. Existing tags/releases are rejected; interrupted uploads can leave a draft, which should be inspected before retrying. Source changes during the build also prevent publishing. Files in `dist/` remain available if an upload fails. This route does not depend on an Actions runner or its billing status.
+
+[GitHub CLI authentication](https://cli.github.com/manual/gh_auth_login) · [Release creation](https://cli.github.com/manual/gh_release_create)
+
 ## Windows single-file build
 
 Build on Windows x64 with Python 3.11; PyInstaller does not cross-compile Windows executables from Linux. Use the commands in the README or the **Build desktop and PWA** GitHub Actions workflow.
